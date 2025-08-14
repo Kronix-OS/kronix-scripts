@@ -1,0 +1,21 @@
+[project]
+name = "kronixpy"
+version = "0.1.0"
+authors = [{ name = "Axel PASCON", email = "axelpascon@nullware.dev" }]
+description = "Python scripts and executables for the Kronix Operating System"
+readme = "../README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license-files = ["../LICENSE"]
+dependencies = ["tqdm~=4.67", "python-gnupg~=0.5", "GitPython~=3.1", "requests~=2.32"]
+
+[project.urls]
+Homepage = "https://github.com/Kronix-OS/kronix-scripts"
+Issues = "https://github.com/Kronix-OS/kronix-scripts/issues"
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,7 @@
+tqdm ~= 4.67
+python-gnupg ~= 0.5
+GitPython ~= 3.1
+requests ~= 2.32
+semantic-version ~= 2.10
+beautifulsoup4 ~= 4.13
+xxhash ~= 3.5

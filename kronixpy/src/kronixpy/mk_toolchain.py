@@ -1,6 +1,4 @@
-from bs4 import BeautifulSoup
 import json
-from string import Template
 import tarfile
 import requests
 import ftplib
@@ -11,13 +9,14 @@ import os
 import shutil
 import argparse
 import inspect
-from typing import Optional, Any, Callable
 import gnupg
 import functools
 import time
-import semver
-import download
-from .errprint import (
+from typing import Optional, Any, Callable
+from bs4 import BeautifulSoup
+from string import Template
+from kronixpy import download, semver
+from kronixpy.errprint import (
     pdebug,
     pinfo,
     pwarning,
@@ -47,16 +46,10 @@ def timefunc(func):
     return wrapper
 
 
-set_logfile(
-    _joinpaths(os.getcwd(), os.path.splitext(os.path.basename(__file__))[0] + ".log")
-)
-_usrhomedir = os.environ.get("HOME", "/root")
-gpg = gnupg.GPG(gnupghome=_joinpaths(_usrhomedir, ".gnupg"))
-
+GPG = None
 MAKEJOBS: int = (os.cpu_count() or 1) + 1
-MAKELOAD: float = MAKEJOBS * 0.75
+MAKELOAD: float = MAKEJOBS * 0.8
 MAKEFLAGS: list[str] = [f"--jobs={MAKEJOBS}", f"--load-average={MAKELOAD}"]
-pinfo(f"MAKEFLAGS: {MAKEFLAGS}")
 
 
 def _is_child_path(parent: str, child: str) -> bool:
@@ -101,17 +94,17 @@ def _rm_toolchain_dirs(exclude: list[str] | None = None) -> None:
     real_exclude = _rmnonexistent(real_exclude)
     real_exclude = _rmredundant(real_exclude)
 
-    def _not_excluded(path: str) -> bool:
+    def _is_excluded(path: str) -> bool:
         for ex in real_exclude:
             if _is_child_path(ex, path):
-                return False
-        return True
+                return True
+        return False
 
     for dirent in os.scandir(get_toolchain_dir()):
-        if dirent.is_dir() and _not_excluded(dirent.path):
+        if dirent.is_dir() and not _is_excluded(dirent.path):
             pinfo(f"Removing {dirent.path}")
             shutil.rmtree(dirent.path)
-        elif _not_excluded(dirent.path):
+        elif not _is_excluded(dirent.path):
             pinfo(f"Removing {dirent.path}")
             os.remove(dirent.path)
     create_dir(get_toolchain_dir("src"))
@@ -120,11 +113,11 @@ def _rm_toolchain_dirs(exclude: list[str] | None = None) -> None:
     return None
 
 
-def sort_versions(versions: list[str]) -> list[str]:
+def _sort_versions(versions: list[str]) -> list[str]:
     return semver.sort(versions, reverse=True)
 
 
-def get_latest_version_from_http(http_url: str, pkgname: str) -> str:
+def _get_latest_version_from_http(http_url: str, pkgname: str) -> str:
     REG_VERSION_STRING = r"(%s-)?\d+\.\d+.*" % pkgname
     pdebug(f"REG_VERSION_STRING: {REG_VERSION_STRING}")
     REG_VERSION = re.compile(REG_VERSION_STRING)
@@ -158,7 +151,7 @@ def get_latest_version_from_http(http_url: str, pkgname: str) -> str:
         return version
 
     versions = [rm_non_numeric_parts(version) for version in versions]
-    versions = sort_versions(versions)
+    versions = _sort_versions(versions)
     if get_debug_mode():
         with open(_joinpaths(os.getcwd(), f"sorted_{pkgname}_versions.txt"), "w") as f:
             pdebug(f"Dumping versions to file {f.name}")
@@ -169,7 +162,7 @@ def get_latest_version_from_http(http_url: str, pkgname: str) -> str:
     return versions[0]
 
 
-def get_latest_version_from_ftp(ftp_url: str, pkgname: str) -> str:
+def _get_latest_version_from_ftp(ftp_url: str, pkgname: str) -> str:
     REG_VERSION_STRING = r"(%s-)?\d+\.\d+.*" % pkgname
     pdebug(f"REG_VERSION_STRING: {REG_VERSION_STRING}")
     REG_VERSION = re.compile(REG_VERSION_STRING)
@@ -211,7 +204,7 @@ def get_latest_version_from_ftp(ftp_url: str, pkgname: str) -> str:
             return version
 
         versions = [rm_non_numeric_parts(version) for version in versions]
-        versions = sort_versions(versions)
+        versions = _sort_versions(versions)
         if get_debug_mode():
             with open(
                 _joinpaths(os.getcwd(), f"sorted_{pkgname}_versions.txt"), "w"
@@ -224,16 +217,17 @@ def get_latest_version_from_ftp(ftp_url: str, pkgname: str) -> str:
     return versions[0]
 
 
-def get_latest_version(base_url: str, package_name: str) -> str:
+def _get_latest_version(base_url: str, package_name: str) -> str:
     if base_url.startswith("http"):
-        return get_latest_version_from_http(base_url, package_name)
+        return _get_latest_version_from_http(base_url, package_name)
     elif base_url.startswith("ftp"):
-        return get_latest_version_from_ftp(base_url, package_name)
+        return _get_latest_version_from_ftp(base_url, package_name)
     else:
         raise ValueError("Unknown protocol")
 
 
-GNU_MIRROR: str = "ftp://ftp.gnu.org/gnu/"
+# GNU_MIRROR: str = "ftp://ftp.gnu.org/gnu/"
+GNU_MIRROR: str = "https://ftp.gnu.org/gnu"
 
 GCC_BASE_URL: str = f"{GNU_MIRROR}/gcc/"
 GCC_VERSION: str = ""
@@ -251,34 +245,7 @@ gcc_additional_config: list[str] = []
 
 __pkgconfigpath = os.environ.get("PKG_CONFIG_PATH")
 
-ENV_VARS: dict[str, str] = {
-    "CC": "/usr/bin/gcc",
-    "CXX": "/usr/bin/g++",
-    "AR": "/usr/bin/gcc-ar",
-    "NM": "/usr/bin/gcc-nm",
-    "RANLIB": "/usr/bin/gcc-ranlib",
-    "LD": "/usr/bin/ld",
-    "AS": "/usr/bin/as",
-    "OBJCOPY": "/usr/bin/objcopy",
-    "OBJDUMP": "/usr/bin/objdump",
-    "READELF": "/usr/bin/readelf",
-    "STRIP": "/usr/bin/strip",
-    "SIZE": "/usr/bin/size",
-    "STRINGS": "/usr/bin/strings",
-    "ADDR2LINE": "/usr/bin/addr2line",
-    "CFLAGS_FOR_TARGET": "-O2 -g -mno-red-zone -mcmodel=kernel -frecord-gcc-switches",
-    "CXXFLAGS_FOR_TARGET": "-O2 -g -mno-red-zone -mcmodel=kernel -frecord-gcc-switches",
-    "TARGET": "x86_64-elf",
-    "PREFIX": get_toolchain_dir("install"),
-    "PATH": _joinpaths(get_toolchain_dir("install"), "bin")
-    + ":"
-    + os.environ.get(
-        "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    ),
-    "PKG_CONFIG_PATH": "/usr/local/lib/pkgconfig/:/usr/local/lib64/pkgconfig/"
-    + (":" if __pkgconfigpath is not None else "")
-    + (__pkgconfigpath or ""),
-}
+ENV_VARS: Optional[dict[str, str]] = None
 
 
 def _add_gcc_config_opts(flags: list[str]) -> None:
@@ -290,6 +257,7 @@ def _add_gcc_config_opts(flags: list[str]) -> None:
 
 def _add_cfamily_flags_for_target(flags: list[str]) -> None:
     global ENV_VARS
+    assert ENV_VARS is not None
     custom_flags: str = " ".join(flags)
     pdebug(f"Adding C-family flags for target: {custom_flags}")
     ENV_VARS["CFLAGS_FOR_TARGET"] += " " + custom_flags
@@ -341,9 +309,9 @@ def download_gcc(base_url: str, version: str, destdir: str, destarchive: str) ->
         f.close()
     pinfo(f"Downloaded {destination}.sig")
     pinfo(f"Verifying {destination}")
-    global gpg
+    global GPG
     with open(f"{destination}.sig", "rb") as f:
-        verified = gpg.verify_file(f, destination)
+        verified = GPG.verify_file(f, destination)
         if not verified:
             pdebug(f"Signature verification: {verified}")
             raise ValueError(f"Signature verification failed for {destination}")
@@ -353,7 +321,7 @@ def download_gcc(base_url: str, version: str, destdir: str, destarchive: str) ->
 
 def download_gdb(base_url: str, version: str, destdir: str, destarchive: str) -> None:
     if version == "latest":
-        version = get_latest_version(base_url + "/gdb/", "gdb")
+        version = _get_latest_version(base_url + "/gdb/", "gdb")
         pdebug(f"Latest gdb version: {version}")
     for dirent in os.scandir(destdir):
         if os.path.basename(dirent.path).startswith("gdb"):
@@ -390,9 +358,9 @@ def download_gdb(base_url: str, version: str, destdir: str, destarchive: str) ->
         f.close()
     pinfo(f"Downloaded {destination}.sig")
     pinfo(f"Verifying {destination}")
-    global gpg
+    global GPG
     with open(f"{destination}.sig", "rb") as f:
-        verified = gpg.verify_file(f, destination)
+        verified = GPG.verify_file(f, destination)
         if not verified:
             pdebug(f"Signature verification: {verified}")
             raise ValueError(f"Signature verification failed for {destination}")
@@ -404,7 +372,7 @@ def download_binutils(
     base_url: str, version: str, destdir: str, destarchive: str
 ) -> None:
     if version == "latest":
-        version = get_latest_version(base_url + "/binutils/", "binutils")
+        version = _get_latest_version(base_url + "/binutils/", "binutils")
         pdebug(f"Latest binutils version: {version}")
     for dirent in os.scandir(destdir):
         if os.path.basename(dirent.path).startswith("binutils"):
@@ -449,9 +417,9 @@ def download_binutils(
         f.close()
     pinfo(f"Downloaded {destination}.sig")
     pinfo(f"Verifying {destination}")
-    global gpg
+    global GPG
     with open(f"{destination}.sig", "rb") as f:
-        verified = gpg.verify_file(f, destination)
+        verified = GPG.verify_file(f, destination)
         if not verified:
             pdebug(f"Signature verification: {verified}")
             raise ValueError(f"Signature verification failed for {destination}")
@@ -506,7 +474,7 @@ def parse_cmdline() -> argparse.Namespace:
     parser.add_argument(
         "--target-architecture",
         type=str,
-        default="x86_64-elf",
+        default="x86_64-unknown-none-elf",
         help="Target architecture",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
@@ -516,7 +484,7 @@ def parse_cmdline() -> argparse.Namespace:
     parser.add_argument(
         "--gcc-version",
         type=str,
-        default=DeferredWrapper(get_latest_version, GCC_BASE_URL, "gcc"),
+        default=DeferredWrapper(_get_latest_version, GCC_BASE_URL, "gcc"),
         help="Version of GCC to download",
     )
     parser.add_argument(
@@ -530,6 +498,9 @@ def parse_cmdline() -> argparse.Namespace:
     )
     parser.add_argument(
         "--with-target-tune", type=str, default="alderlake", help="Target tune"
+    )
+    parser.add_argument(
+        "-o", "--toolchain-dir", type=str, required=True, help="The output directory"
     )
     return parser.parse_args()
 
@@ -553,6 +524,9 @@ def gcc_prerequisites(extracted_dir: str) -> None:
 
 
 def _build_env_list(package: str) -> list[str]:
+    global ENV_VARS
+    assert ENV_VARS is not None
+
     def _rm_mcmodel(envstr: str) -> str:
         return (
             envstr.replace("-mcmodel=kernel", "")
@@ -584,6 +558,8 @@ def build_gcc(src: str) -> None:
 
     try:
         global gcc_additional_config
+        global ENV_VARS
+        assert ENV_VARS is not None
         params: list[str] = [
             *env,
             _joinpaths(extracted_dir, "configure"),
@@ -595,6 +571,7 @@ def build_gcc(src: str) -> None:
             "--enable-lto",
             "--enable-long-long",
             "--with-long-double-128",
+            "--with-static-standard-libraries",
             "--enable-plugin",
             "--without-headers",
             "--disable-shared",
@@ -605,7 +582,9 @@ def build_gcc(src: str) -> None:
             "--disable-libsanitizer",
             "--disable-libquadmath",
             "--disable-libgomp",
-            "--disable-libstdcxx",
+            "--disable-hosted-libstdcxx",
+            "--enable-libstdcxx-static-eh-pool",
+            "--with-libstdcxx-eh-pool-obj-count=64",
             "--disable-thread",
             "--with-gnu-as",
             "--with-gnu-ld",
@@ -613,7 +592,6 @@ def build_gcc(src: str) -> None:
         ]
         subprocess.run(params, check=True)
     except subprocess.CalledProcessError as e:
-
         pwarning(f"GCC not configured: {traceback.format_exc()}")
         prompt = input("Continue without GCC build? [y/N]: ")
         if prompt.lower() == "y":
@@ -641,7 +619,6 @@ def build_gcc(src: str) -> None:
                 check=True,
             )
         except subprocess.CalledProcessError as e:
-
             pwarning(f"First part of GCC build failed: {traceback.format_exc()}")
             prompt = input("Continue without building GCC? [y/N]: ")
             if prompt.lower() == "y":
@@ -663,7 +640,6 @@ def build_gcc(src: str) -> None:
                 check=True,
             )
         except subprocess.CalledProcessError as e:
-
             pwarning(f"libgcc not patched: {traceback.format_exc()}")
             prompt = input("Continue without patching libgcc? [y/N]: ")
             if prompt.lower() == "y":
@@ -672,53 +648,34 @@ def build_gcc(src: str) -> None:
                 perror("Aborting")
                 sys.exit(1)
         pinfo("Patched libgcc")
-        pinfo("Start second part of GCC build")
-        try:
-            subprocess.run(
-                [
-                    *env,
-                    "make",
-                    *MAKEFLAGS,
-                    "all",
-                    "CFLAGS_FOR_TARGET=" + ENV_VARS["CFLAGS_FOR_TARGET"],
-                    "CXXFLAGS_FOR_TARGET=" + ENV_VARS["CXXFLAGS_FOR_TARGET"],
-                ],
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
 
-            pwarning(f"Second part of GCC build failed: {traceback.format_exc()}")
-            prompt = input("Continue without building GCC? [y/N]: ")
-            if prompt.lower() == "y":
-                return None
-            else:
-                perror("Aborting")
-                sys.exit(1)
-        pinfo("Second part of GCC build succeded")
+        pinfo("Start second part of GCC build")
     else:
         pinfo("Building GCC")
-        try:
-            subprocess.run(
-                [
-                    *env,
-                    "make",
-                    *MAKEFLAGS,
-                    "all",
-                    "CFLAGS_FOR_TARGET=" + ENV_VARS["CFLAGS_FOR_TARGET"],
-                    "CXXFLAGS_FOR_TARGET=" + ENV_VARS["CXXFLAGS_FOR_TARGET"],
-                ],
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
 
-            pwarning(f"GCC not built: {traceback.format_exc()}")
-            prompt = input("Continue without GCC build? [y/N]: ")
-            if prompt.lower() == "y":
-                return None
-            else:
-                perror("Aborting")
-                sys.exit(1)
-        pinfo("Built GCC")
+    try:
+        subprocess.run(
+            [
+                *env,
+                "make",
+                *MAKEFLAGS,
+                "all-gcc",
+                "all-target-libgcc",
+                "all-target-libstdc++-v3",
+                "CFLAGS_FOR_TARGET=" + ENV_VARS["CFLAGS_FOR_TARGET"],
+                "CXXFLAGS_FOR_TARGET=" + ENV_VARS["CXXFLAGS_FOR_TARGET"],
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        pwarning(f"GCC not built: {traceback.format_exc()}")
+        prompt = input("Continue without GCC build? [y/N]: ")
+        if prompt.lower() == "y":
+            return None
+        else:
+            perror("Aborting")
+            sys.exit(1)
+    pinfo("Built GCC")
 
     pinfo("Installing GCC")
     try:
@@ -726,14 +683,15 @@ def build_gcc(src: str) -> None:
             [
                 *env,
                 "make",
-                "install",
+                "install-gcc",
+                "install-target-libgcc",
+                "install-target-libstdc++-v3",
                 "CFLAGS_FOR_TARGET=" + ENV_VARS["CFLAGS_FOR_TARGET"],
                 "CXXFLAGS_FOR_TARGET=" + ENV_VARS["CXXFLAGS_FOR_TARGET"],
             ],
             check=True,
         )
     except subprocess.CalledProcessError as e:
-
         pwarning(f"GCC not installed: {traceback.format_exc()}")
         prompt = input("Continue without GCC build? [y/N]: ")
         if prompt.lower() == "y":
@@ -742,59 +700,14 @@ def build_gcc(src: str) -> None:
             perror("Aborting")
             sys.exit(1)
     pinfo("Installed GCC")
-    # if True:
-    #    os.chdir(currdir)
-    #    return None
-    pinfo("Building libgcc")
-    try:
-        subprocess.run(
-            [
-                *env,
-                "make",
-                *MAKEFLAGS,
-                "all-target-libgcc",
-                "CFLAGS_FOR_TARGET=" + ENV_VARS["CFLAGS_FOR_TARGET"],
-                "CXXFLAGS_FOR_TARGET=" + ENV_VARS["CXXFLAGS_FOR_TARGET"],
-            ],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-
-        pwarning(f"libgcc not built: {traceback.format_exc()}")
-        prompt = input("Continue without GCC build? [y/N]: ")
-        if prompt.lower() == "y":
-            return None
-        else:
-            perror("Aborting")
-            sys.exit(1)
-    pinfo("Built libgcc")
-    pinfo("Installing libgcc")
-    try:
-        subprocess.run(
-            [
-                *env,
-                "make",
-                "install-target-libgcc",
-                "CFLAGS_FOR_TARGET=" + ENV_VARS["CFLAGS_FOR_TARGET"],
-                "CXXFLAGS_FOR_TARGET=" + ENV_VARS["CXXFLAGS_FOR_TARGET"],
-            ],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-
-        pwarning(f"libgcc not installed: {traceback.format_exc()}")
-        prompt = input("Continue without GCC build? [y/N]: ")
-        if prompt.lower() == "y":
-            return None
-        else:
-            perror("Aborting")
-            sys.exit(1)
-    pinfo("Installed libgcc")
+    
     os.chdir(currdir)
     return None
 
 
 def build_binutils(src: str) -> None:
+    global ENV_VARS
+    assert ENV_VARS is not None
     extracted_dir = src
     currdir = os.getcwd()
     builddir = _joinpaths(get_toolchain_dir("build"), extracted_dir.split("/")[-1])
@@ -850,6 +763,8 @@ def build_binutils(src: str) -> None:
 
 
 def build_gdb(src: str) -> None:
+    global ENV_VARS
+    assert ENV_VARS is not None
     extracted_dir = src
     currdir = os.getcwd()
     builddir = _joinpaths(get_toolchain_dir("build"), extracted_dir.split("/")[-1])
@@ -939,6 +854,8 @@ def download_limine(destdir: str, destarchive: str) -> None:
 
 
 def build_limine(src: str) -> None:
+    global ENV_VARS
+    assert ENV_VARS is not None
     extracted_dir = src
     currdir = os.getcwd()
     builddir = _joinpaths(get_toolchain_dir("build"), extracted_dir.split("/")[-1])
@@ -1019,9 +936,9 @@ def download_qemu(destdir: str, destarchive: str) -> None:
         f.close()
     pinfo(f"Downloaded {destination}.sig")
     pinfo(f"Verifying {destination}")
-    global gpg
+    global GPG
     with open(f"{destination}.sig", "rb") as f:
-        verified = gpg.verify_file(f, destination)
+        verified = GPG.verify_file(f, destination)
         if not verified:
             pdebug(f"Signature verification: {verified}")
             raise ValueError(f"Signature verification failed for {destination}")
@@ -1030,7 +947,7 @@ def download_qemu(destdir: str, destarchive: str) -> None:
 
 
 def download_nasm(destdir: str, destarchive: str) -> None:
-    LATEST_VERSION = get_latest_version(
+    LATEST_VERSION = _get_latest_version(
         "https://www.nasm.us/pub/nasm/releasebuilds/", "nasm"
     )
     NASM_LINK = f"https://www.nasm.us/pub/nasm/releasebuilds/{LATEST_VERSION}/nasm-{LATEST_VERSION}.tar.xz"
@@ -1046,6 +963,8 @@ def download_nasm(destdir: str, destarchive: str) -> None:
 
 
 def build_nasm(src: str) -> None:
+    global ENV_VARS
+    assert ENV_VARS is not None
     extracted_dir = src
     currdir = os.getcwd()
     builddir = _joinpaths(get_toolchain_dir("build"), extracted_dir.split("/")[-1])
@@ -1131,6 +1050,8 @@ def _get_qemu_cpu() -> str:
 
 
 def build_qemu(src: str) -> None:
+    global ENV_VARS
+    assert ENV_VARS is not None
     extracted_dir = src
     currdir = os.getcwd()
     builddir = _joinpaths(get_toolchain_dir("build"), extracted_dir.split("/")[-1])
@@ -1155,10 +1076,10 @@ def build_qemu(src: str) -> None:
             f"--gdb={_joinpaths(get_toolchain_dir("install"), 'bin', ENV_VARS['TARGET'])}-gdb",
             "--enable-lto",
             "--enable-strip",
-            # "--enable-system",
+            "--enable-tcg-interpreter",
+            "--disable-docs",
             "--enable-virtfs",
             "--enable-plugins",
-            # "--disable-xkbcommon"
         ]
         params: list[str] = [
             *env,
@@ -1336,10 +1257,52 @@ def main() -> int:
     try:
         global GCC_VERSION
         global ENV_VARS
+        global TOOLCHAIN_ROOT
+        global GPG
+
+        _usrhomedir = os.environ.get("HOME", "/root")
+        GPG = gnupg.GPG(gnupghome=_joinpaths(_usrhomedir, ".gnupg"))
+        pinfo(f"MAKEFLAGS: {MAKEFLAGS}")
 
         cmdline_args = parse_cmdline()
         set_debug_mode(cmdline_args.debug)
         pdebug("Debug mode enabled")
+        if not isinstance(cmdline_args.toolchain_dir, str):
+            raise ValueError("Invalid toolchain directory")
+        TOOLCHAIN_ROOT = cmdline_args.toolchain_dir
+        set_logfile(
+            _joinpaths(
+                TOOLCHAIN_ROOT, os.path.splitext(os.path.basename(__file__))[0] + ".log"
+            )
+        )
+        ENV_VARS = {
+            "CC": "/usr/bin/gcc",
+            "CXX": "/usr/bin/g++",
+            "AR": "/usr/bin/gcc-ar",
+            "NM": "/usr/bin/gcc-nm",
+            "RANLIB": "/usr/bin/gcc-ranlib",
+            "LD": "/usr/bin/ld",
+            "AS": "/usr/bin/as",
+            "OBJCOPY": "/usr/bin/objcopy",
+            "OBJDUMP": "/usr/bin/objdump",
+            "READELF": "/usr/bin/readelf",
+            "STRIP": "/usr/bin/strip",
+            "SIZE": "/usr/bin/size",
+            "STRINGS": "/usr/bin/strings",
+            "ADDR2LINE": "/usr/bin/addr2line",
+            "CFLAGS_FOR_TARGET": "-O2 -g -mno-red-zone -mcmodel=kernel -frecord-gcc-switches",
+            "CXXFLAGS_FOR_TARGET": "-O2 -g -mno-red-zone -mcmodel=kernel -frecord-gcc-switches",
+            "TARGET": "x86_64-elf",
+            "PREFIX": get_toolchain_dir("install"),
+            "PATH": _joinpaths(get_toolchain_dir("install"), "bin")
+            + ":"
+            + os.environ.get(
+                "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ),
+            "PKG_CONFIG_PATH": "/usr/local/lib/pkgconfig/:/usr/local/lib64/pkgconfig/"
+            + (":" if __pkgconfigpath is not None else "")
+            + (__pkgconfigpath or ""),
+        }
         if not isinstance(cmdline_args.with_target_arch, str) or not isinstance(
             cmdline_args.with_target_tune, str
         ):
@@ -1389,7 +1352,6 @@ def main() -> int:
 
         return 0
     except Exception as e:
-
         perror(traceback.format_exc())
         return 1
 

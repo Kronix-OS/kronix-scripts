@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
-
 import os
 import sys
 import argparse
+import traceback
 from string import Template
 
 def parse_cmdline() -> argparse.Namespace:
@@ -156,15 +155,14 @@ zerOS_${section}_end = LOADADDR(.${section}) + SIZEOF(.${section});
 
     return 0
 
-def main_wrapper() -> None:
-    import traceback
+def main_wrapper() -> int:
     try:
-        sys.exit(main())
+        return main()
     except Exception as e:
         traceback.print_exc()
-        sys.exit(1)
+        return 42
 
 if __name__ == '__main__':
-    main_wrapper()
+    sys.exit(main_wrapper())
 
     

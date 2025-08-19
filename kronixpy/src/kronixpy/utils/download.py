@@ -1,7 +1,9 @@
+import sys
 import tqdm
 import requests
 import io
 import ftplib
+from kronixpy.errprint import perror
 
 
 def from_http(url, showstatus=False) -> bytes:
@@ -35,25 +37,29 @@ def from_ftp(url, showstatus=False) -> bytes:
     if not directory:
         directory = "/"
     actual_host = actual_host.split("/")[0]
-    with ftplib.FTP(actual_host) as ftp:
-        ftp.login()
-        ftp.cwd(directory)
+    try:
+        with ftplib.FTP(actual_host) as ftp:
+            ftp.login()
+            ftp.cwd(directory)
 
-        fsize = ftp.size(file)
-        with io.BytesIO() as f:
-            with tqdm.tqdm(
-                total=fsize,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                disable=not showstatus,
-                desc=f"downloading {url}",
-            ) as status:
+            fsize = ftp.size(file)
+            with io.BytesIO() as f:
+                with tqdm.tqdm(
+                    total=fsize,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    disable=not showstatus,
+                    desc=f"downloading {url}",
+                ) as status:
 
-                def _cb(b: bytes) -> int:
-                    ret = f.write(b)
-                    status.update(ret)
-                    return ret
+                    def _cb(b: bytes) -> int:
+                        ret = f.write(b)
+                        status.update(ret)
+                        return ret
 
-                ftp.retrbinary("RETR " + file, _cb)
-            return f.getvalue()
+                    ftp.retrbinary("RETR " + file, _cb)
+                return f.getvalue()
+    except ftplib.Error as e:
+        perror(f"{e}")
+        sys.exit(1)

@@ -1,4 +1,5 @@
 from typing import Callable, Any, Generic, TypeVar, Optional, NewType, Self
+from types import TracebackType
 from threading import Lock, RLock
 from inspect import isroutine
 from contextlib import contextmanager
@@ -53,6 +54,19 @@ class _MutexBase(Generic[T, _T_Mtx]):
     def __str__(self: Self) -> str:
         return str(self.get())
 
+    def __enter__(self: Self) -> T:
+        self._mtx.acquire()
+        return self._value
+
+    def __exit__(
+        self: Self,
+        exc_type: Optional[type],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> bool:
+        self._mtx.release()
+        return False
+
     def get(self: Self) -> T:
         with _mutex(self._mtx):
             return self._value
@@ -65,13 +79,16 @@ class _MutexBase(Generic[T, _T_Mtx]):
 
     def mapget(self: Self, method: Callable, *args: Any, **kwargs: Any) -> Any:
         with _mutex(self._mtx):
-            return method(self._value, *args, **kwargs)
+            self._value = method(self._value, *args, **kwargs)
+            return self._value
         return unreachable()
 
-    def mapset(self: Self, method: Callable, *args: Any, **kwargs: Any):
+    def getmap(self: Self, method: Callable, *args: Any, **kwargs: Any) -> Any:
         with _mutex(self._mtx):
+            old = self._value
             self._value = method(self._value, *args, **kwargs)
-        return None
+            return old
+        return unreachable()
 
 
 class Mutex(_MutexBase[T, LockType]):

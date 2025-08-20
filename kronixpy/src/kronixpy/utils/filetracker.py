@@ -23,17 +23,20 @@ from typing import (
     Iterator,
     override,
     overload,
+    TYPE_CHECKING,
 )
 from types import TracebackType
-from _typeshed import StrOrBytesPath
 from pathlib import Path
 from .mutex import Mutex
 from . import BreakTo, unreachable
+from os import PathLike
 
 if sys.platform == "win32":
     from filelock import WindowsFileLock as FileLock
 else:
     from filelock import UnixFileLock as FileLock
+
+type StrOrBytesPath = str | bytes | PathLike[str] | PathLike[bytes]
 
 
 def _kind_string(path: Path) -> tuple[Optional[str], str]:

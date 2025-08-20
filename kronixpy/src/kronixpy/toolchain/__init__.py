@@ -2,7 +2,7 @@ import os
 import re
 from enum import StrEnum, ReprEnum
 from typing import Self, Any, Optional, Callable
-from ..utils import unreachable
+from ..utils import unreachable, isoneof
 from operator import eq
 
 MAKEJOBS: int = (os.cpu_count() or 1) + 1
@@ -34,6 +34,12 @@ class ToolchainComponent(StrEnum):
     QEMU     = "qemu"
     LIMINE   = "limine"
     # fmt: on
+
+    @property
+    def is_gnu_pkg(self: Self) -> bool:
+        return isoneof(self)(
+            ToolchainComponent.BINUTILS, ToolchainComponent.GCC, ToolchainComponent.GDB
+        )
 
 
 class BuildAction(tuple[str, str], ReprEnum):
@@ -103,12 +109,12 @@ class BuildAction(tuple[str, str], ReprEnum):
     def failure(self: Self, pkg: ToolchainComponent) -> str:
         return f"could not {self.action(pkg)}"
 
-    def processing(self: Self, pkg: ToolchainComponent) -> str:
+    def start(self: Self, pkg: ToolchainComponent) -> str:
         match self.part, self.desc:
             case None, _:
-                return f"{self[1]} {pkg}"
+                return f"start {self[1]} {pkg}"
             case part, None:
-                return f"{self[1]} {pkg} (part {part})"
+                return f"start {self[1]} {pkg} (part {part})"
             case part, desc:
-                return f"{self[1]} {pkg} (part {part}: {desc})"
+                return f"start {self[1]} {pkg} (part {part}: {desc})"
         return unreachable()

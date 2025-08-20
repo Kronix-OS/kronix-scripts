@@ -1,11 +1,7 @@
 import io
 import string
 import atexit
-import time
 from enum import IntFlag
-from typing import Callable, Optional
-from threading import RLock
-from .mutex import Mutex
 
 ESC: str = "\033"
 
@@ -31,13 +27,6 @@ LOG_PERROR_END:     str = ""
 
 _debug: bool = False
 _logfile: io.TextIOWrapper | None = None
-_bottom_text = None
-_last_spinner_update = 0
-_spinner_index = 0
-_global_io_lock = RLock()
-
-SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-SPINNER_NS_INTERVAL = 250 * 1000 * 1000  # ms * 1000 * 1000 = ns
 
 
 @atexit.register
@@ -83,94 +72,40 @@ class Print(IntFlag):
     BOTH = TERM | LOGFILE
 
 
-def _do_update_spinner():
-    global _global_io_lock, _bottom_text, _last_spinner_update, _spinner_index
-    global SPINNER, SPINNER_NS_INTERVAL
-    with _global_io_lock:
-        if _bottom_text is not None:
-            currtime = time.time_ns()
-            if currtime - _last_spinner_update > SPINNER_NS_INTERVAL:
-                _last_spinner_update = currtime
-                _spinner_index = (_spinner_index + 1) % len(SPINNER)
-    return None
-
-
-def _erase_bottom_text():
-    global _global_io_lock, _bottom_text
-    with _global_io_lock:
-        if _bottom_text is not None:
-            _del_line()
-    return None
-
-
-def _write_bottom_text():
-    global _global_io_lock, _bottom_text
-    with _global_io_lock:
-        if _bottom_text is not None:
-            _do_update_spinner()
-            print(f"{_bottom_text} {SPINNER[_spinner_index]}", end=None)
-    return None
-
-
-def praw(msg: str, end: Optional[str] = "\n", where: Print = Print.BOTH):
-    global _global_io_lock, _bottom_text
-    with _global_io_lock:
+def pdebug(msg: str, end: str | None = "\n", where: Print = Print.BOTH):
+    global _debug
+    if _debug:
         if where & Print.TERM:
-            _erase_bottom_text()
-            print(msg, end=end)
-            _write_bottom_text()
+            print(f"{PDEBUG_START}{msg}{PDEBUG_END}", end=end)
         if where & Print.LOGFILE:
-            _handle_logfile(msg + (end or ""))
+            _handle_logfile(f"{LOG_PDEBUG_START}{msg}{LOG_PDEBUG_END}" + (end or ""))
     return None
 
 
-def pdebug(msg: str, end: Optional[str] = "\n", where: Print = Print.BOTH):
-    global _global_io_lock, _debug, _bottom_text
-    with _global_io_lock:
-        if _debug:
-            praw(msg=f"{PDEBUG_START}{msg}{PDEBUG_END}", end=end, where=where)
+def pinfo(msg: str, end: str | None = "\n", where: Print = Print.BOTH):
+    if where & Print.TERM:
+        print(f"{PINFO_START}{msg}{PINFO_END}", end=end)
+    if where & Print.LOGFILE:
+        _handle_logfile(f"{LOG_PINFO_START}{msg}{LOG_PINFO_END}" + (end or ""))
     return None
 
 
-def pinfo(msg: str, end: Optional[str] = "\n", where: Print = Print.BOTH):
-    return praw(f"{PINFO_START}{msg}{PINFO_END}", end=end, where=where)
+def pwarning(msg: str, end: str | None = "\n", where: Print = Print.BOTH):
+    if where & Print.TERM:
+        print(f"{PWARNING_START}{msg}{PWARNING_END}", end=end)
+    if where & Print.LOGFILE:
+        _handle_logfile(f"{LOG_PWARNING_START}{msg}{LOG_PWARNING_END}" + (end or ""))
+    return None
 
 
-def pwarning(msg: str, end: Optional[str] = "\n", where: Print = Print.BOTH):
-    return praw(f"{PWARNING_START}{msg}{PWARNING_END}", end=end, where=where)
-
-
-def perror(msg: str, end: Optional[str] = "\n", where: Print = Print.BOTH):
-    return praw(f"{PERROR_START}{msg}{PERROR_END}", end=end, where=where)
+def perror(msg: str, end: str | None = "\n", where: Print = Print.BOTH):
+    if where & Print.TERM:
+        print(f"{PERROR_START}{msg}{PERROR_END}", end=end)
+    if where & Print.LOGFILE:
+        _handle_logfile(f"{LOG_PERROR_START}{msg}{LOG_PERROR_END}" + (end or ""))
+    return None
 
 
 def make_tty_link(text: str, url: str) -> str:
     template = string.Template(f"{ESC}]8;;${{link}}{ESC}\\${{text}}{ESC}]8;;{ESC}\\\n")
     return template.safe_substitute(link=url, text=text)
-
-
-def register_bottom_text(text: str):
-    global _bottom_text, _last_spinner_update, _spinner_index, _global_io_lock
-    with _global_io_lock:
-        _bottom_text = text
-        _write_bottom_text()
-        _handle_logfile(f"{text}\n")
-    return None
-
-
-def _del_line():
-    return print(f"{ESC}[2K\r", end=None)
-
-
-def update_spinner():
-    return praw("", end=None, where=Print.TERM)
-
-
-def unregister_bottom_text():
-    global _bottom_text, _global_io_lock
-    with _global_io_lock:
-        if _bottom_text is None:
-            return None
-        _del_line()
-        _bottom_text = None
-    return None

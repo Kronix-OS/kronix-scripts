@@ -1,7 +1,22 @@
-from typing import Generator, Optional, NoReturn, Self, TypeVar, Generic
+from typing import (
+    Any,
+    Generator,
+    Optional,
+    NoReturn,
+    Self,
+    TypeVar,
+    Generic,
+    Iterable,
+    overload,
+    override,
+    Iterator,
+)
+from typing_extensions import Buffer
 import os
+import io
 import sys
 import gnupg
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import dataclass
@@ -10,6 +25,9 @@ from .errprint import ESC
 from os import PathLike
 from .mutex import Mutex
 from operator import eq
+from collections import UserDict
+from collections.abc import Mapping, Sequence
+import subprocess
 
 type StrOrBytesPath = str | bytes | PathLike[str] | PathLike[bytes]
 
@@ -179,10 +197,23 @@ _GLOBAL_GPG_INSTANCE: Mutex[gnupg.GPG] = Mutex(gnupg.GPG())
 
 def verify_file(file: StrOrBytesPath, sig: StrOrBytesPath):
     with _GLOBAL_GPG_INSTANCE as gpg:
-        result = gpg.verify_file(str(sig), str(file))
+        with open(sig, "rb") as sigbytes:
+            result = gpg.verify_file(sigbytes, stringify(file), close_file=False)
+            if not result:
+                raise RuntimeError(
+                    f"could not verify authenticity of file `{stringify(file)}` from signature located at `{stringify(sig)}`: "
+                    + traceback.format_exc()
+                )
+    return None
+
+
+def verify_data(data: io.BytesIO, sig: StrOrBytesPath):
+    with _GLOBAL_GPG_INSTANCE as gpg:
+        result = gpg.verify_data(stringify(sig), data.getbuffer())
         if not result:
             raise RuntimeError(
-                f"could not verify authenticity of file `{file}` from signature located at `{sig}`"
+                f"could not verify authenticity of in-memory file from signature located at `{stringify(sig)}`: "
+                + traceback.format_exc()
             )
     return None
 
@@ -193,5 +224,60 @@ def bind(fn, *args, **kwargs):
 
     return _binder
 
+
 def isoneof(value):
     return lambda *args: value in args
+
+
+KT = TypeVar("KT", infer_variance=True)
+VT = TypeVar("VT", infer_variance=True)
+
+
+class FrozenDict(Generic[KT, VT], Mapping[KT, VT]):
+    @overload
+    def __init__(self: Self, init: Iterable[tuple[KT, VT]]): ...
+    @overload
+    def __init__(self: Self, init: Mapping[KT, VT]): ...
+    def __init__(self: Self, init):
+        if isinstance(init, Mapping):
+            self._dict = dict(init)
+        elif isinstance(init, Iterable):
+            self._dict = dict(init)
+        else:
+            raise TypeError(f"incompatible type `{type(init)}`")
+        return None
+
+    @override
+    def __getitem__(self: Self, key: KT, /) -> VT:
+        return self._dict.__getitem__(key)
+
+    @override
+    def __iter__(self: Self) -> Iterator[KT]:
+        return self._dict.__iter__()
+
+    @override
+    def __len__(self: Self) -> int:
+        return self._dict.__len__()
+
+
+def stringify(obj: Any, encoding: str = "utf-8", errors="surrogateescape") -> str:
+    if isinstance(obj, Buffer):
+        return str(obj, encoding=encoding, errors=errors)
+    return str(obj)
+
+
+def unstringify(
+    string: str, mutable: bool = True, encoding: str = "utf-8", errors="surrogateescape"
+) -> bytearray | bytes:
+    if mutable:
+        return bytearray(string, encoding=encoding, errors=errors)
+    return bytes(string, encoding=encoding, errors=errors)
+
+
+def run_executable(executable: Any, cmdargs: Sequence[Any], *args: Any, **kwargs: Any):
+    from .errprint import pdebug
+
+    stringified: list[str] = [stringify(executable)]
+    stringified.extend(map(stringify, cmdargs))
+    pdebug(f"running `{" ".join(stringified)}`...")
+    return subprocess.run(stringified, *args, **kwargs)

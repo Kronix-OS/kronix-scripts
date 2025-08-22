@@ -4,7 +4,6 @@ from threading import Lock, RLock
 from inspect import isroutine
 from contextlib import contextmanager
 from functools import wraps
-from . import unreachable
 
 
 class LockType:
@@ -52,7 +51,8 @@ class _MutexBase(Generic[T, _T_Mtx]):
         return None
 
     def __str__(self: Self) -> str:
-        return str(self.get())
+        from . import stringify
+        return stringify(self.get())
 
     def __enter__(self: Self) -> T:
         self._mtx.acquire()

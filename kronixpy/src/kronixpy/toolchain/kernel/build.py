@@ -1,12 +1,28 @@
-from ... import Namespace, Arch, common_main
+from ...common import Namespace, Arch, common_main
 from ...utils.errprint import *
 from ...utils.mutex import Mutex
 from ...utils import *
 from .. import ToolchainComponent, MAKEJOBS, MAKEFLAGS, MAKELOAD, BuildAction
 from ...utils import semver, download
 from pathlib import Path
-from shutil import rmtree
-from typing import Self, Callable, Iterable, TypeVar, Unpack, Any, ClassVar, IO
+from shutil import rmtree as rm, move as mv
+from typing import (
+    Self,
+    Iterable,
+    TypeVar,
+    Unpack,
+    Any,
+    ClassVar,
+    IO,
+    ParamSpec,
+    TypedDict,
+    NotRequired,
+    Concatenate,
+    Protocol,
+    runtime_checkable,
+)
+from abc import abstractmethod
+from collections.abc import Callable
 from functools import cached_property, cache as cached, lru_cache as lru_cached
 from multiprocessing.pool import ThreadPool
 from operator import add
@@ -14,12 +30,14 @@ import subprocess
 from subprocess import CompletedProcess
 import traceback
 import requests
+from contextlib import closing
 from bs4 import BeautifulSoup
 import re
 import ftplib
 from string import Template
 import tarfile
 import zipfile
+from ...utils import FrozenDict
 
 type _DownloadFunc = Callable[
     [KernelToolchainBuilder],
@@ -39,31 +57,77 @@ type _InstallFunc = Callable[
 ]
 
 
-def _untar_or_unzip(archive: Path, to: Path):
-    pdebug(f"decompressing `{archive}` to `{to}`")
+def _untar_or_unzip(
+    pkg: ToolchainComponent, exts: list[str], archive: io.BytesIO, to: Path
+):
+    pdebug(f"decompressing `{pkg}.{'.'.join(exts)}` to `{to}`")
     to.mkdir()
-    if archive.suffix == ".zip":
-        fn = zipfile.ZipFile
-        args = (archive, "r")
-    elif archive.suffixes[-2] == ".tar":
-        fn = tarfile.TarFile
-        args = (archive, "r")
+    exceptions = []
+    archive.seek(0)
+
+    def _rm_nested_dir():
+        iterator = to.iterdir()
+        inner = next(iterator)
+        try:
+            next(iterator)
+        except StopIteration:
+            pass
+        else:
+            return None
+
+        for path in inner.iterdir():
+            mv(path, to)
+
+        inner.rmdir()
+
+        return None
+
+    try:
+        with tarfile.open(fileobj=archive, mode="r") as tar:
+            tar.extractall(to)
+    except BaseException as e:
+        exceptions.append(e)
     else:
-        raise ValueError(f"unknown archive kind: {archive}")
+        return _rm_nested_dir()
 
-    with fn(*args) as archivefile:
-        archivefile.extractall(to)
+    try:
+        with zipfile.ZipFile(archive, "r") as zip:
+            zip.extractall(to)
+    except BaseException as e:
+        exceptions.append(e)
+    else:
+        return _rm_nested_dir()
 
-    return None
+    raise ExceptionGroup("could not decompress in-memory archive", exceptions)
 
 
-_STEP_COUNT: Mutex[int] = Mutex(1)
+_STEP_COUNT: Mutex[int] = Mutex(0)
+
+if False:
+    _P = ParamSpec("_P", infer_variance=True)
+else:
+    _P = ParamSpec("_P")
+_R = TypeVar("_R", infer_variance=True)
 
 
-class Step:
+@runtime_checkable
+class _StepFn(Protocol[_P, _R]):
+    @abstractmethod
+    def __call__(
+        self: Self,
+        pkg: ToolchainComponent,
+        path: Optional[Path] = None,
+        env: Optional[dict[str, str]] = None,
+        /,
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> _R: ...
+
+
+class Step(Generic[_P, _R]):
     def __init__(
         self: Self,
-        step_fn: Callable,
+        step_fn: _StepFn[_P, _R],
         pkg: ToolchainComponent,
         action: BuildAction,
     ):
@@ -73,8 +137,12 @@ class Step:
         return None
 
     def __call__(
-        self: Self, builder: "KernelToolchainBuilder", *args, **kwargs
-    ) -> Optional[Any]:
+        self: Self,
+        builder: "KernelToolchainBuilder",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> Optional[_R]:
+        pinfo("-" * 80)
         pinfo(f"STEP n°{_STEP_COUNT.mapget(add, 1)} - {self._action.action(self._pkg)}")
         result = None
         try:
@@ -87,12 +155,14 @@ class Step:
                 case BuildAction.INSTALL | BuildAction.BUILD:
                     path = builder.build_directory / self._pkg
             result = self._fn(
-                env=make_env_for(builder, self._pkg, self._action),
-                path=path,
-                pkg=self._pkg,
+                self._pkg,
+                path,
+                make_env_for(builder, self._pkg, self._action),
                 *args,
                 **kwargs,
             )
+        except KeyboardInterrupt:
+            raise
         except BaseException as e:
             pwarning(f"{self._action.failure(self._pkg)}: {traceback.format_exc()}")
             prompt = input("Continue ? [y/N]: ")
@@ -104,23 +174,34 @@ class Step:
 
 
 def make(
-    target: str,
+    pkg: ToolchainComponent,
     path: Optional[Path] = None,
     env: Optional[dict[str, str]] = None,
-    *args,
-    **kwargs,
+    /,
+    *,
+    target: str,
 ) -> CompletedProcess[str]:
     with save_env(env=env, path=path) as savedenv:
-        pdebug(f"running `{" ".join(["make", *MAKEFLAGS, target])}`")
-        return subprocess.run(
-            ["make", *MAKEFLAGS, target], universal_newlines=True, check=True
+        return run_executable(
+            "make", [*MAKEFLAGS, target], universal_newlines=True, check=True
         )
     return unreachable()
 
 
+_REG_VERSION_STRING = r"^/?(%s-)?(?P<version>\d+\.\d+(\.\d+)?)((\.(zip|tar.*)|/)?)$"
+REG_VERSION: FrozenDict[ToolchainComponent, re.Pattern[str]] = FrozenDict(
+    map(
+        lambda pkg: (pkg, re.compile(_REG_VERSION_STRING % pkg)),
+        filter(
+            lambda component: component != ToolchainComponent.ALL,
+            iter(ToolchainComponent),
+        ),
+    )
+)
+
+
 def _get_latest_version_from_ftp(ftp_url: str, pkg: ToolchainComponent) -> str:
-    REG_VERSION_STRING = r"(%s-)?\d+\.\d+.*" % pkg
-    REG_VERSION = re.compile(REG_VERSION_STRING)
+    pdebug(str(REG_VERSION[pkg]))
     if not "://" in ftp_url:
         actual_ftp = ftp_url
     else:
@@ -134,81 +215,41 @@ def _get_latest_version_from_ftp(ftp_url: str, pkg: ToolchainComponent) -> str:
         ftp.login()
         ftp.cwd(directory)
         versions = ftp.nlst()
-        versions = [version for version in versions if REG_VERSION.match(version)]
-        cpy: list[str] = []
-        for version in versions:
-            if version.startswith(pkg):
-                cpy.append(version.split("-")[1])
-            else:
-                cpy.append(version)
-        versions = cpy
+        versions: list[str] = [
+            matched_version.group("version")
+            for matched_version in map(REG_VERSION[pkg].match, versions)
+            if bool(matched_version)
+        ]
 
-        def rm_non_numeric_parts(version: str) -> str:
-            def rightchar(char: str) -> bool:
-                return char.isdigit() or char == "."
-
-            def rmpoint(v: str) -> str:
-                if v[-1] == ".":
-                    return v[:-1]
-                return v
-
-            for i, char in enumerate(version):
-                if not rightchar(char):
-                    return rmpoint(version[:i])
-            return version
-
-        versions = [rm_non_numeric_parts(version) for version in versions]
         versions = semver.sort(versions, reverse=True)
     return versions[0]
 
 
 def _get_latest_version_from_http(http_url: str, pkg: ToolchainComponent) -> str:
-    REG_VERSION_STRING = r"(%s-)?\d+\.\d+.*" % pkg
-    REG_VERSION = re.compile(REG_VERSION_STRING)
+    pdebug(str(REG_VERSION[pkg]))
+    # TODO: match against link text instead of link href
     response = requests.get(http_url)
     soup = BeautifulSoup(response.text, "html.parser")
     links = soup.find_all("a")
-    versions = [
-        str(link.get("href"))
-        for link in links
-        if REG_VERSION.match(str(link.get("href")))
+    versions: list[str] = [
+        matched_version.group("version")
+        for matched_version in map(REG_VERSION[pkg].match, map(lambda l: l.text, links))
+        if bool(matched_version)
     ]
-    cpy: list[str] = []
-    for version in versions:
-        if version.startswith(pkg):
-            cpy.append(version.split("-")[1])
-        else:
-            cpy.append(version)
-    versions = cpy
 
-    def rm_non_numeric_parts(version: str) -> str:
-        def rightchar(char: str) -> bool:
-            return char.isdigit() or char == "."
-
-        def rmpoint(v: str) -> str:
-            if v[-1] == ".":
-                return v[:-1]
-            return v
-
-        for i, char in enumerate(version):
-            if not rightchar(char):
-                return rmpoint(version[:i])
-        return version
-
-    versions = [rm_non_numeric_parts(version) for version in versions]
     versions = semver.sort(versions, reverse=True)
     return versions[0]
 
 
 def download_latest(
-    url: str,
     pkg: ToolchainComponent,
-    archive_url: Template,
-    sig_url: Optional[Template],
     path: Optional[Path] = None,
     env: Optional[dict[str, str]] = None,
-    *args,
-    **kwargs,
+    /,
+    *,
+    url: str,
+    archive_url: Template,
+    sig_url: Optional[Template],
 ):
     with save_env(env=env, path=path):
         pdebug(f"retrieving latest {pkg} version...")
@@ -228,58 +269,77 @@ def download_latest(
             return unreachable(
                 f"`{archive_url.template}` is neither an ftp url nor an http url"
             )
-        archive_suffix = archive_url.template.split(".")
-        if archive_suffix[-2] == "tar":
-            archive_suffix = f".{archive_suffix[-2]}.{archive_suffix[-1]}"
+        archive_suffixes = archive_url.template.split("/")[-1].split(".")[1:]
+        assert isoneof(len(archive_suffixes))(1, 2)
+        if archive_suffixes[0] == "tar":
+            archive_suffix = f".{archive_suffixes[0]}.{archive_suffixes[1]}"
         else:
-            archive_suffix = f".{archive_suffix[-1]}"
-        archive = Path(pkg).with_suffix(archive_suffix)
+            archive_suffix = f".{archive_suffixes[0]}"
         pdebug(
             f"downloading archive at {archive_url.safe_substitute(version=vers, pkg=pkg)}"
         )
-        dl_archive(
-            archive_url.safe_substitute(version=vers, pkg=pkg),
-            to=archive,
-        )
+        archive = dl_archive(archive_url.safe_substitute(version=vers, pkg=pkg))
+        assert archive is not None
 
-        if sig_url is not None:
-            if sig_url.template.startswith("http"):
-                dl_sig = download.from_http
-            elif sig_url.template.startswith("ftp"):
-                dl_sig = download.from_ftp
-            else:
-                return unreachable(
-                    f"`{sig_url.template}` is neither an ftp url nor an http url"
+        with closing(archive) as archive:
+            if sig_url is not None:
+                if sig_url.template.startswith("http"):
+                    dl_sig = download.from_http
+                elif sig_url.template.startswith("ftp"):
+                    dl_sig = download.from_ftp
+                else:
+                    return unreachable(
+                        f"`{sig_url.template}` is neither an ftp url nor an http url"
+                    )
+                sig = Path(pkg).with_suffix(f"{archive_suffix}.sig")
+                pdebug(
+                    f"downloading signature at {sig_url.safe_substitute(version=vers, pkg=pkg)}"
                 )
-            sig = Path(pkg).with_suffix(f"{archive_suffix}.sig")
-            pdebug(
-                f"downloading signature at {sig_url.safe_substitute(version=vers, pkg=pkg)}"
-            )
-            dl_sig(
-                sig_url.safe_substitute(version=vers, pkg=pkg),
-                to=sig,
-            )
-        else:
-            pwarning(f"no signature file for package {pkg}")
-            sig = None
+                dl_sig(
+                    sig_url.safe_substitute(version=vers, pkg=pkg),
+                    to=sig,
+                )
+            else:
+                pwarning(f"no signature file for package {pkg}")
+                sig = None
 
-        if sig is not None:
-            verify_file(archive, sig)
+            if sig is not None:
+                verify_data(archive, sig)
 
-        return _untar_or_unzip(archive, Path(pkg))
+            return _untar_or_unzip(pkg, archive_suffixes, archive, Path(pkg))
+
+    return unreachable()
+
+
+def configure(
+    pkg: ToolchainComponent,
+    path: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    /,
+    *configure_args: str,
+    pkgdir: Path,
+):
+    with save_env(env=env, path=path) as savedenv:
+        run_executable(pkgdir / "configure", configure_args, check=True)
+    return None
+    # "--target=" + ENV_VARS["TARGET"],
+    # "--prefix=" + ENV_VARS["PREFIX"],
+    # "--with-sysroot",
+    # "--disable-werror",
 
 
 def _get_download_func(pkg: ToolchainComponent) -> _DownloadFunc:
     match pkg:
         case gnu if gnu.is_gnu_pkg:
-            _base_url = "https://ftp.gnu.org/gnu"
-            url = f"{_base_url}/{pkg}/"
+            # _base_url = "https://ftp.gnu.org/gnu"
+            _base_url = "https://ftpmirror.gnu.org"
+            url = f"https://ftp.gnu.org/gnu/{pkg}/"
             if gnu == ToolchainComponent.GCC:
                 archive_url = Template(
-                    f"{_base_url}/${{pkg}}-${{version}}/${{pkg}}-${{version}}.tar.xz"
+                    f"{_base_url}/${{pkg}}/${{pkg}}-${{version}}/${{pkg}}-${{version}}.tar.xz"
                 )
                 sig_url = Template(
-                    f"{_base_url}/${{pkg}}-${{version}}/${{pkg}}-${{version}}.tar.xz.sig"
+                    f"{_base_url}/${{pkg}}/${{pkg}}-${{version}}/${{pkg}}-${{version}}.tar.xz.sig"
                 )
             else:
                 archive_url = Template(
@@ -308,7 +368,9 @@ def _get_download_func(pkg: ToolchainComponent) -> _DownloadFunc:
 
 
 def _get_configure_func(pkg: ToolchainComponent) -> _ConfigureFunc:
-    pass
+    match pkg:
+        case ToolchainComponent.BINUTILS:
+            pass
 
 
 def _get_build_func(pkg: ToolchainComponent) -> _BuildFunc:
@@ -380,6 +442,7 @@ class KernelToolchainBuilder:
         default_tune: str,
     ):
         self._packages = set(packages)
+        pdebug(", ".join(self._packages))
         self._dir = dir
         self._arch = arch
         self._default_arch = default_arch
@@ -473,33 +536,68 @@ class KernelToolchainBuilder:
         self._cflags = list(flags)
         return None
 
-    def prepare(self: Self):
-        rmtree(self.install_directory, ignore_errors=True)
-        self.install_directory.mkdir(parents=True, exist_ok=False)
+    def prepare(self: Self, /, __builddir_not_found=False):
+        if not self.root_directory.exists(follow_symlinks=False):
+            if __builddir_not_found:
+                pinfo("could not find build directory")
+            else:
+                pinfo("could not find root directory")
+            self.root_directory.mkdir(parents=True)
+            self.src_directory.mkdir()
+            self.build_directory.mkdir()
+            self.install_directory.mkdir()
+            self._packages = set(
+                filter(
+                    # see `_parse_package_list` for more info
+                    lambda component: (
+                        component != ToolchainComponent.LIMINE
+                        and component != ToolchainComponent.ALL
+                    ),
+                    iter(ToolchainComponent),
+                )
+            )
+            pinfo(f"rebuilding every packages: {", ".join(self._packages)}")
+            return None
+
+        if not self.build_directory.exists(follow_symlinks=False):
+            rm(self.root_directory)
+            return self.prepare(__builddir_not_found=True)
+
+        rm(self.install_directory, ignore_errors=True)
+        self.install_directory.mkdir()
         for pkg in self._packages:
             pkgdir = self.build_directory / pkg
             if pkgdir.exists(follow_symlinks=False):
-                rmtree(pkgdir)
-        for fsobj in filter(
-            lambda d: any([d.name.startswith(pkg) for pkg in self._packages]),
-            self.src_directory.iterdir(),
-        ):
-            if fsobj.is_dir(follow_symlinks=False):
-                fsobj.rmdir()
-            else:
-                fsobj.unlink()
+                rm(pkgdir)
         for pkgdir in filter(
             lambda d: d.is_dir(follow_symlinks=False), self.build_directory.iterdir()
         ):
             _get_install_func(ToolchainComponent(pkgdir.name))(self)
+
+        if self.src_directory.exists(follow_symlinks=False):
+            for fsobj in filter(
+                lambda d: any([d.name.startswith(pkg) for pkg in self._packages]),
+                self.src_directory.iterdir(),
+            ):
+                if fsobj.is_dir(follow_symlinks=False):
+                    rm(fsobj)
+                else:
+                    fsobj.unlink()
+        else:
+            self.src_directory.mkdir()
+
         return None
 
     def download(self: Self):
-        with ThreadPool(processes=MAKEJOBS) as pool:
-            results = pool.map_async(
-                lambda pkg: _get_download_func(pkg)(self), self._packages
-            )
-            results.wait()
+        for pkg in ToolchainComponent.toolchain_build_order(self._packages):
+            _get_download_func(pkg)(self)
+        return None
+
+    def build_and_install(self: Self):
+        for pkg in ToolchainComponent.toolchain_build_order(self._packages):
+            _get_configure_func(pkg)(self)
+            _get_build_func(pkg)(self)
+            _get_install_func(pkg)(self)
         return None
 
 
@@ -510,7 +608,8 @@ def _parse_package_list(args: Namespace) -> list[ToolchainComponent]:
         return list(
             filter(
                 # Limine is handled separately when building the kernel
-                lambda component: component != ToolchainComponent.LIMINE,
+                lambda component: component != ToolchainComponent.LIMINE
+                and component != ToolchainComponent.ALL,
                 iter(ToolchainComponent),
             )
         )
@@ -523,14 +622,14 @@ def main(args: Namespace) -> int:
         builder = KernelToolchainBuilder(
             _parse_package_list(args),
             Path(args.toolchain_dir).resolve(),
-            Arch.coerce_from(args.architecure),
+            Arch.coerce_from(args.architecture),
             args.with_target_arch,
             args.with_target_tune,
         )
         builder.prepare()
         builder.download()
-    except Exception as e:
-        perror(f"failed to build kernel toolchain: {e}")
+    except Exception:
+        perror(f"failed to build kernel toolchain: {traceback.format_exc()}")
         return 1
     return 0
 

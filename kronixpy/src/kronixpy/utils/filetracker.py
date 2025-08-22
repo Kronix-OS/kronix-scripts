@@ -163,11 +163,13 @@ class _FileList:
         return None
 
     def _build(self: Self, dir: Path) -> _FsDepth:
-        path: str = str(dir)
+        from . import stringify
+
+        path: str = stringify(dir)
         dirs: dict[str, _FsDir] = {}
         others: dict[str, _FsNotDir] = {}
         for fsobj in dir.iterdir():
-            fsobjpath = str(fsobj)
+            fsobjpath = stringify(fsobj)
             if fsobj.is_dir(follow_symlinks=False):
                 dirs[fsobjpath] = self._build(fsobj)
             else:
@@ -195,7 +197,11 @@ class FileTracker(Generic[KeyT], MutableMapping[KeyT, list[Path]]):
         parents: bool = False,
         directory_mode: Optional[int] = None,
     ):
-        self._directory = Path(str(os.path.realpath(directory, strict=ALLOW_MISSING)))
+        from . import stringify
+
+        self._directory = Path(
+            stringify(os.path.realpath(directory, strict=ALLOW_MISSING))
+        )
         if not self._directory.exists(follow_symlinks=False):
             if create:
                 if directory_mode is None:
@@ -209,7 +215,7 @@ class FileTracker(Generic[KeyT], MutableMapping[KeyT, list[Path]]):
         if not self._directory.is_dir(follow_symlinks=False):
             return _expected("a directory", self._directory)
 
-        self._persistent = Path(str(persistent)).resolve(strict=False)
+        self._persistent = Path(stringify(persistent)).resolve(strict=False)
 
         self._persistent_db = dbm.open(self._persistent, "c")
 

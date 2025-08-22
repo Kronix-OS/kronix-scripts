@@ -1,7 +1,7 @@
 import os
 import re
 from enum import StrEnum, ReprEnum
-from typing import Self, Any, Optional, Callable
+from typing import Self, Any, Optional, Callable, Iterable, Iterator, Container
 from ..utils import unreachable, isoneof
 from operator import eq
 
@@ -28,8 +28,8 @@ class ToolchainComponent(StrEnum):
     # fmt: off
     ALL      = "all"
     BINUTILS = "binutils"
-    NASM     = "nasm"
     GCC      = "gcc"
+    NASM     = "nasm"
     GDB      = "gdb"
     QEMU     = "qemu"
     LIMINE   = "limine"
@@ -40,6 +40,13 @@ class ToolchainComponent(StrEnum):
         return isoneof(self)(
             ToolchainComponent.BINUTILS, ToolchainComponent.GCC, ToolchainComponent.GDB
         )
+    
+    @classmethod
+    def toolchain_build_order(cls: type[Self], packages: Container["ToolchainComponent"]) -> Iterator["ToolchainComponent"]:
+        for pkg in cls:
+            if pkg in packages:
+                yield pkg
+        return None
 
 
 class BuildAction(tuple[str, str], ReprEnum):

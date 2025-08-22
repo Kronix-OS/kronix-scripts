@@ -1,5 +1,5 @@
 from ..utils.errprint import *
-from .. import Namespace, common_main
+from ..common import Namespace, common_main
 
 
 def main(args: Namespace) -> int:

@@ -40,9 +40,11 @@ class ToolchainComponent(StrEnum):
         return isoneof(self)(
             ToolchainComponent.BINUTILS, ToolchainComponent.GCC, ToolchainComponent.GDB
         )
-    
+
     @classmethod
-    def toolchain_build_order(cls: type[Self], packages: Container["ToolchainComponent"]) -> Iterator["ToolchainComponent"]:
+    def toolchain_build_order(
+        cls: type[Self], packages: Container["ToolchainComponent"]
+    ) -> Iterator["ToolchainComponent"]:
         for pkg in cls:
             if pkg in packages:
                 yield pkg
@@ -92,6 +94,14 @@ class BuildAction(tuple[str, str], ReprEnum):
         if not _throws(getattr, self, "_part_desc")[0]:
             del self._part_desc
         return None
+
+    @property
+    def is_step(self: Self) -> bool:
+        return self.part is None
+
+    @property
+    def is_substep(self: Self) -> bool:
+        return self.part is not None
 
     def action(self: Self, pkg: ToolchainComponent) -> str:
         match self.part, self.desc:

@@ -1,4 +1,5 @@
 from typing import (
+    Literal,
     Any,
     Generator,
     Optional,
@@ -11,6 +12,7 @@ from typing import (
     override,
     Iterator,
 )
+from types import NoneType
 from typing_extensions import Buffer
 import os
 import io
@@ -70,6 +72,28 @@ class BreakTo(BaseException):
         if self._layers != 0:
             raise BreakTo(self._layers - 1)
         return None
+
+
+def assert_some[T](opt: Optional[T]) -> T:
+    if opt is None:
+        raise AssertionError(f"`{repr(opt)}` of type `{repr(type(opt))}` is None")
+    return opt
+
+
+T_exc_infer = TypeVar("T_exc_infer", infer_variance=True, bound=BaseException)
+
+
+class AlreadyPrinted(Generic[T_exc_infer], BaseException):
+    def __init__(self: Self, exc: Optional[T_exc_infer]):
+        if exc is not None:
+            self.exc = exc
+        else:
+            self.exc = assert_some(sys.exception())
+        return None
+
+    @property
+    def exception(self: Self) -> T_exc_infer | BaseException:
+        return self.exc
 
 
 T_co = TypeVar("T_co", covariant=True)
@@ -281,3 +305,8 @@ def run_executable(executable: Any, cmdargs: Sequence[Any], *args: Any, **kwargs
     stringified.extend(map(stringify, cmdargs))
     pdebug(f"running `{" ".join(stringified)}`...")
     return subprocess.run(stringified, *args, **kwargs)
+
+
+TrueLiteral = Literal[True]
+FalseLiteral = Literal[False]
+type UnusedType = NoneType

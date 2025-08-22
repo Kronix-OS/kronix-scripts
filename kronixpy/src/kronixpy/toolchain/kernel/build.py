@@ -6,7 +6,10 @@ from .. import ToolchainComponent, MAKEJOBS, MAKEFLAGS, MAKELOAD, BuildAction
 from ...utils import semver, download
 from pathlib import Path
 from shutil import rmtree as rm, move as mv
+from types import NoneType
 from typing import (
+    NewType,
+    TypeAlias,
     Self,
     Iterable,
     TypeVar,
@@ -20,6 +23,7 @@ from typing import (
     Concatenate,
     Protocol,
     runtime_checkable,
+    TypeVarTuple,
 )
 from abc import abstractmethod
 from collections.abc import Callable
@@ -108,6 +112,7 @@ if False:
 else:
     _P = ParamSpec("_P")
 _R = TypeVar("_R", infer_variance=True)
+_RR = TypeVar("_RR", infer_variance=True)
 
 
 @runtime_checkable
@@ -124,53 +129,182 @@ class _StepFn(Protocol[_P, _R]):
     ) -> _R: ...
 
 
-class Step(Generic[_P, _R]):
+SamePathMarkerType = NewType("SamePathMarkerType", NoneType)
+SamePath = SamePathMarkerType(None)
+assert None is not SamePath
+assert SamePath is SamePath
+
+SameEnvMarkerType = NewType("SameEnvMarkerType", NoneType)
+SameEnv = SameEnvMarkerType(None)
+assert None is not SameEnv
+assert SameEnv is SameEnv
+
+
+class Step(Generic[_P, _R, _RR]):
+    type SubStepArgsType = tuple[
+        _StepFn[_P, _RR],
+        BuildAction,
+        Optional[Path | SamePathMarkerType],
+        Optional[dict[str, str] | SameEnvMarkerType],
+    ]
+
     def __init__(
         self: Self,
         step_fn: _StepFn[_P, _R],
         pkg: ToolchainComponent,
         action: BuildAction,
+        *substeps: SubStepArgsType,
     ):
         self._fn = step_fn
         self._pkg = pkg
         self._action = action
+        if len(substeps) != 0:
+            self._substeps = list(substeps)
+        else:
+            self._substeps = None
         return None
+
+    @overload
+    @classmethod
+    def _do_call(
+        cls: type[Self],
+        is_substep: TrueLiteral,
+        substeps: NoneType,
+        path: Optional[Path | SamePathMarkerType],
+        env: Optional[dict[str, str] | SameEnvMarkerType],
+        fn: _StepFn[_P, _RR],
+        pkg: ToolchainComponent,
+        action: BuildAction,
+        builder: "KernelToolchainBuilder",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> Optional[_RR]: ...
+
+    @overload
+    @classmethod
+    def _do_call(
+        cls: type[Self],
+        is_substep: FalseLiteral,
+        substeps: Optional[SubStepArgsType],
+        path: UnusedType,
+        env: UnusedType,
+        fn: _StepFn[_P, _R],
+        pkg: UnusedType,
+        action: UnusedType,
+        builder: "KernelToolchainBuilder",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> Optional[_R | tuple[_R, list[Optional[_RR]]]]: ...
+
+    @classmethod
+    def _do_call(
+        cls: type[Self],
+        is_substep: bool,
+        substeps,
+        path,
+        env,
+        fn,
+        pkg,
+        action,
+        builder: "KernelToolchainBuilder",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ):
+        if is_substep:
+            assert action.is_substep
+            pinfo(f"SUBSTEP - {action.action(pkg)}")
+        else:
+            assert action.is_step
+            pinfo("-" * 80)
+            pinfo(f"STEP n°{_STEP_COUNT.mapget(add, 1)} - {action.action(pkg)}")
+
+        result = None
+        try:
+            pinfo(f"{action.start(pkg)}")
+            result = fn(
+                pkg,
+                path,
+                env,
+                *args,
+                **kwargs,
+            )
+        except KeyboardInterrupt:
+            raise
+        except AlreadyPrinted:
+            perror(f"{action.failure(pkg)}")
+        except BaseException as e:
+            pwarning(f"{action.failure(pkg)}: {traceback.format_exc()}")
+            prompt = input("Continue ? [y/N]: ")
+            if prompt.lower() != "y":
+                perror("aborting")
+                raise AlreadyPrinted(e)
+            else:
+                pwarning("continuing...")
+        pinfo(action.success(pkg))
+        return result
+
+    @classmethod
+    def _get_path(
+        cls: type[Self],
+        pkg: ToolchainComponent,
+        action: BuildAction,
+        builder: "KernelToolchainBuilder",
+    ) -> Path:
+        match action:
+            case BuildAction.DOWNLOAD:
+                return builder.src_directory
+            case BuildAction.CONFIGURE | BuildAction.INSTALL | BuildAction.BUILD:
+                return builder.build_directory / pkg
+        return unreachable()
 
     def __call__(
         self: Self,
         builder: "KernelToolchainBuilder",
         *args: _P.args,
         **kwargs: _P.kwargs,
-    ) -> Optional[_R]:
-        pinfo("-" * 80)
-        pinfo(f"STEP n°{_STEP_COUNT.mapget(add, 1)} - {self._action.action(self._pkg)}")
-        result = None
-        try:
-            pinfo(f"{self._action.start(self._pkg)}")
-            match self._action:
-                case BuildAction.DOWNLOAD:
-                    path = builder.src_directory
-                case BuildAction.CONFIGURE:
-                    path = builder.src_directory / self._pkg
-                case BuildAction.INSTALL | BuildAction.BUILD:
-                    path = builder.build_directory / self._pkg
-            result = self._fn(
-                self._pkg,
-                path,
-                make_env_for(builder, self._pkg, self._action),
-                *args,
-                **kwargs,
-            )
-        except KeyboardInterrupt:
-            raise
-        except BaseException as e:
-            pwarning(f"{self._action.failure(self._pkg)}: {traceback.format_exc()}")
-            prompt = input("Continue ? [y/N]: ")
-            if prompt.lower() != "y":
-                perror("aborting")
-                raise e
-        pinfo(self._action.success(self._pkg))
-        return result
+    ) -> Optional[_R | tuple[_R, list[_RR]]]:
+        def _call_with_substeps(
+            pkg: ToolchainComponent,
+            path: Optional[Path] = None,
+            env: Optional[dict[str, str]] = None,
+            /,
+            *fwargs: _P.args,
+            **fwkwargs: _P.kwargs,
+        ) -> tuple[_R, list[_RR]]:
+            def _call_substep(func, p, e):
+                if p is SamePath:
+                    p = path
+                if e is SameEnv:
+                    e = env
+
+            result = self._fn(pkg, path, env, *fwargs, **fwkwargs)
+            subresults = [func()]
+            return result, subresults
+
+        # if self._substeps is not None:
+        #    return self._do_call(
+        #        False,
+        #        _call_with_substeps,
+        #        self._pkg,
+        #        self._action,
+        #        builder,
+        #        *args,
+        #        **kwargs,
+        #    )
+        path = self._get_path(self._pkg, self._action, builder)
+        env = make_env_for(builder, self._pkg, self._action)
+        return self._do_call(
+            False,
+            self._substeps,
+            path,
+            env,
+            self._fn,
+            self._pkg,
+            self._action,
+            builder,
+            *args,
+            **kwargs,
+        )
 
 
 def make(
@@ -322,10 +456,6 @@ def configure(
     with save_env(env=env, path=path) as savedenv:
         run_executable(pkgdir / "configure", configure_args, check=True)
     return None
-    # "--target=" + ENV_VARS["TARGET"],
-    # "--prefix=" + ENV_VARS["PREFIX"],
-    # "--with-sysroot",
-    # "--disable-werror",
 
 
 def _get_download_func(pkg: ToolchainComponent) -> _DownloadFunc:
@@ -368,8 +498,17 @@ def _get_download_func(pkg: ToolchainComponent) -> _DownloadFunc:
 
 
 def _get_configure_func(pkg: ToolchainComponent) -> _ConfigureFunc:
+    def _create_pkg_build_directory(builder: KernelToolchainBuilder):
+        return (builder.build_directory / pkg).mkdir()
+
     match pkg:
         case ToolchainComponent.BINUTILS:
+            [
+                "--target=" + ENV_VARS["TARGET"],
+                "--prefix=" + ENV_VARS["PREFIX"],
+                "--with-sysroot",
+                "--disable-werror",
+            ]
             pass
 
 
@@ -628,7 +767,10 @@ def main(args: Namespace) -> int:
         )
         builder.prepare()
         builder.download()
-    except Exception:
+    except AlreadyPrinted:
+        perror("failed to build kernel toolchain")
+        return 1
+    except BaseException:
         perror(f"failed to build kernel toolchain: {traceback.format_exc()}")
         return 1
     return 0

@@ -5,7 +5,9 @@ from typing import Self, Any, cast, Callable, Optional, NoReturn
 import time
 from functools import wraps
 from .generate.secinfo import main as secinfo_main
+from .toolchain import ToolchainComponent
 from .toolchain.kernel.build import main as ktoolchain_build_main
+from .toolchain.kernel.print import main as ktoolchain_print_main
 from .utils.errprint import *
 from .common import *
 
@@ -73,7 +75,21 @@ PARSER_DESCRIPTOR = {
                                 },
                             ],
                             "func": ktoolchain_build_main,
-                        }
+                        },
+                        "print": {
+                            "help": "Print name of installed executable given a specified "
+                            + "toolchain location and target architecture",
+                            "args": [
+                                {
+                                    "names": ["component"],
+                                    "type": str,
+                                    "required": True,
+                                    "nargs": 1,
+                                    "help": "The toolchain component whose path is to be printed",
+                                }
+                            ],
+                            "func": ktoolchain_print_main,
+                        },
                     },
                 }
             },

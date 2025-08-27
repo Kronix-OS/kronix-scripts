@@ -80,6 +80,18 @@ def assert_some[T](opt: Optional[T]) -> T:
     return opt
 
 
+def assert_none(opt: Optional[Any]) -> None:
+    if opt is not None:
+        raise AssertionError(f"`{repr(opt)}` of type `{repr(type(opt))}` is not None")
+    return opt
+
+
+def assert_type(value: Any, expected_type: type) -> Any:
+    if not (isinstance(value, expected_type) or issubclass(type(value), expected_type)):
+        raise AssertionError(f"`{repr(value)}` is not of type `{repr(expected_type)}`")
+    return value
+
+
 T_exc_infer = TypeVar("T_exc_infer", infer_variance=True, bound=BaseException)
 
 
@@ -242,7 +254,7 @@ def verify_data(data: io.BytesIO, sig: StrOrBytesPath):
     return None
 
 
-def bind(fn, *args, **kwargs):
+def bind(fn, /, *args, **kwargs):
     def _binder(*late_args, **late_kwargs):
         return fn(*args, *late_args, **kwargs, **late_kwargs)
 

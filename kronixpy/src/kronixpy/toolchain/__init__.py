@@ -57,81 +57,55 @@ class BuildAction(tuple[str, str], ReprEnum):
     BUILD = "built", "building"
     INSTALL = "installed", "installing"
 
-    @property
-    def part(self: Self) -> Optional[int]:
-        doesnt_have_part, part = _throws(getattr, self, "_part")
-        if doesnt_have_part:
-            return None
-        assert isinstance(part, _Result) and isinstance(part.value, int)
-        return part.value
-
-    @part.setter
-    def part(self: Self, part: int):
-        self._part = part
-        return None
-
-    @part.deleter
-    def part(self: Self):
-        if not _throws(getattr, self, "_part")[0]:
-            del self._part
-        return None
-
-    @property
-    def desc(self: Self) -> Optional[str]:
-        doesnt_have_desc, desc = _throws(getattr, self, "_part_desc")
-        if doesnt_have_desc:
-            return None
-        assert isinstance(desc, _Result) and isinstance(desc.value, str)
-        return desc.value
-
-    @desc.setter
-    def desc(self: Self, desc: str):
-        self._part_desc = desc
-        return None
-
-    @desc.deleter
-    def desc(self: Self):
-        if not _throws(getattr, self, "_part_desc")[0]:
-            del self._part_desc
-        return None
-
-    @property
-    def is_step(self: Self) -> bool:
-        return self.part is None
-
-    @property
-    def is_substep(self: Self) -> bool:
-        return self.part is not None
-
-    def action(self: Self, pkg: ToolchainComponent) -> str:
-        match self.part, self.desc:
+    def action(
+        self: Self,
+        pkg: ToolchainComponent,
+        part: Optional[int] = None,
+        desc: Optional[str] = None,
+    ) -> str:
+        match part, desc:
             case None, _:
                 return f"{self.name.lower()} {pkg}"
-            case part, None:
-                return f"{self.name.lower()} {pkg} (part {part})"
-            case part, desc:
-                return f"{self.name.lower()} {pkg} (part {part}: {desc})"
+            case somepart, None:
+                return f"{self.name.lower()} {pkg} (part {somepart})"
+            case somepart, somedesc:
+                return f"{self.name.lower()} {pkg} (part {somepart}: {somedesc})"
         return unreachable()
 
-    def success(self: Self, pkg: ToolchainComponent) -> str:
-        match self.part, self.desc:
+    def success(
+        self: Self,
+        pkg: ToolchainComponent,
+        part: Optional[int] = None,
+        desc: Optional[str] = None,
+    ) -> str:
+        match part, desc:
             case None, _:
                 return f"succesfully {self[0]} {pkg}"
-            case part, None:
-                return f"succesfully {self[0]} {pkg} (part {part})"
-            case part, desc:
-                return f"succesfully {self[0]} {pkg} (part {part}: {desc})"
+            case somepart, None:
+                return f"succesfully {self[0]} {pkg} (part {somepart})"
+            case somepart, somedesc:
+                return f"succesfully {self[0]} {pkg} (part {somepart}: {somedesc})"
         return unreachable()
 
-    def failure(self: Self, pkg: ToolchainComponent) -> str:
-        return f"could not {self.action(pkg)}"
+    def failure(
+        self: Self,
+        pkg: ToolchainComponent,
+        part: Optional[int] = None,
+        desc: Optional[str] = None,
+    ) -> str:
+        return f"could not {self.action(pkg, part, desc)}"
 
-    def start(self: Self, pkg: ToolchainComponent) -> str:
-        match self.part, self.desc:
+    def start(
+        self: Self,
+        pkg: ToolchainComponent,
+        part: Optional[int] = None,
+        desc: Optional[str] = None,
+    ) -> str:
+        match part, desc:
             case None, _:
                 return f"start {self[1]} {pkg}"
-            case part, None:
-                return f"start {self[1]} {pkg} (part {part})"
-            case part, desc:
-                return f"start {self[1]} {pkg} (part {part}: {desc})"
+            case somepart, None:
+                return f"start {self[1]} {pkg} (part {somepart})"
+            case somepart, somedesc:
+                return f"start {self[1]} {pkg} (part {somepart}: {somedesc})"
         return unreachable()

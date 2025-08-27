@@ -53,11 +53,11 @@ type _ConfigureFunc = Callable[
 ]
 type _BuildFunc = Callable[
     [KernelToolchainBuilder],
-    None,
+    Any,
 ]
 type _InstallFunc = Callable[
     [KernelToolchainBuilder],
-    Optional[CompletedProcess[str] | list[CompletedProcess[str]]],
+    Optional[CompletedProcess[str] | dict[int, CompletedProcess[str]]],
 ]
 
 
@@ -129,21 +129,34 @@ class _StepFn(Protocol[_P, _R]):
     ) -> _R: ...
 
 
-SamePathMarkerType = NewType("SamePathMarkerType", NoneType)
-SamePath = SamePathMarkerType(None)
+# fmt: off
+class SamePathMarkerType:
+    pass
+SamePath = SamePathMarkerType()
+# fmt: on
 assert None is not SamePath
 assert SamePath is SamePath
+assert not isinstance(None, SamePathMarkerType)
+assert isinstance(SamePath, SamePathMarkerType)
 
-SameEnvMarkerType = NewType("SameEnvMarkerType", NoneType)
-SameEnv = SameEnvMarkerType(None)
+
+# fmt: off
+class SameEnvMarkerType:
+    pass
+SameEnv = SameEnvMarkerType()
+# fmt: on
 assert None is not SameEnv
 assert SameEnv is SameEnv
+assert not isinstance(None, SameEnvMarkerType)
+assert isinstance(SameEnv, SameEnvMarkerType)
+
+StepInfo = NewType("StepInfo", tuple[BuildAction, Optional[tuple[int, str]]])
 
 
 class Step(Generic[_P, _R, _RR]):
-    type SubStepArgsType = tuple[
+    type SubStepArgs = tuple[
         _StepFn[_P, _RR],
-        BuildAction,
+        StepInfo,
         Optional[Path | SamePathMarkerType],
         Optional[dict[str, str] | SameEnvMarkerType],
     ]
@@ -153,7 +166,7 @@ class Step(Generic[_P, _R, _RR]):
         step_fn: _StepFn[_P, _R],
         pkg: ToolchainComponent,
         action: BuildAction,
-        *substeps: SubStepArgsType,
+        *substeps: SubStepArgs,
     ):
         self._fn = step_fn
         self._pkg = pkg
@@ -164,83 +177,42 @@ class Step(Generic[_P, _R, _RR]):
             self._substeps = None
         return None
 
-    @overload
     @classmethod
-    def _do_call(
-        cls: type[Self],
-        is_substep: TrueLiteral,
-        substeps: NoneType,
-        path: Optional[Path | SamePathMarkerType],
-        env: Optional[dict[str, str] | SameEnvMarkerType],
-        fn: _StepFn[_P, _RR],
-        pkg: ToolchainComponent,
-        action: BuildAction,
-        builder: "KernelToolchainBuilder",
-        *args: _P.args,
-        **kwargs: _P.kwargs,
-    ) -> Optional[_RR]: ...
-
-    @overload
-    @classmethod
-    def _do_call(
-        cls: type[Self],
-        is_substep: FalseLiteral,
-        substeps: Optional[SubStepArgsType],
-        path: UnusedType,
-        env: UnusedType,
-        fn: _StepFn[_P, _R],
-        pkg: UnusedType,
-        action: UnusedType,
-        builder: "KernelToolchainBuilder",
-        *args: _P.args,
-        **kwargs: _P.kwargs,
-    ) -> Optional[_R | tuple[_R, list[Optional[_RR]]]]: ...
-
-    @classmethod
-    def _do_call(
+    def _do_call[_Res](
         cls: type[Self],
         is_substep: bool,
-        substeps,
-        path,
-        env,
-        fn,
-        pkg,
-        action,
-        builder: "KernelToolchainBuilder",
-        *args: _P.args,
-        **kwargs: _P.kwargs,
-    ):
+        fn: Callable[[], _Res],
+        pkg: ToolchainComponent,
+        info: StepInfo,
+    ) -> Optional[_Res]:
+        action, substep_info = info
         if is_substep:
-            assert action.is_substep
-            pinfo(f"SUBSTEP - {action.action(pkg)}")
+            assert substep_info is not None
+            part, desc = substep_info
+            pinfo(f"SUBSTEP - {action.action(pkg, part, desc)}")
         else:
-            assert action.is_step
+            assert substep_info is None
+            part, desc = None, None
             pinfo("-" * 80)
             pinfo(f"STEP n°{_STEP_COUNT.mapget(add, 1)} - {action.action(pkg)}")
 
         result = None
         try:
-            pinfo(f"{action.start(pkg)}")
-            result = fn(
-                pkg,
-                path,
-                env,
-                *args,
-                **kwargs,
-            )
+            pinfo(f"{action.start(pkg, part, desc)}")
+            result = fn()
         except KeyboardInterrupt:
             raise
         except AlreadyPrinted:
-            perror(f"{action.failure(pkg)}")
+            perror(f"{action.failure(pkg, part, desc)}")
         except BaseException as e:
-            pwarning(f"{action.failure(pkg)}: {traceback.format_exc()}")
+            pwarning(f"{action.failure(pkg, part, desc)}: {traceback.format_exc()}")
             prompt = input("Continue ? [y/N]: ")
             if prompt.lower() != "y":
                 perror("aborting")
                 raise AlreadyPrinted(e)
             else:
                 pwarning("continuing...")
-        pinfo(action.success(pkg))
+        pinfo(action.success(pkg, part, desc))
         return result
 
     @classmethod
@@ -262,48 +234,47 @@ class Step(Generic[_P, _R, _RR]):
         builder: "KernelToolchainBuilder",
         *args: _P.args,
         **kwargs: _P.kwargs,
-    ) -> Optional[_R | tuple[_R, list[_RR]]]:
-        def _call_with_substeps(
-            pkg: ToolchainComponent,
-            path: Optional[Path] = None,
-            env: Optional[dict[str, str]] = None,
-            /,
-            *fwargs: _P.args,
-            **fwkwargs: _P.kwargs,
-        ) -> tuple[_R, list[_RR]]:
-            def _call_substep(func, p, e):
-                if p is SamePath:
-                    p = path
-                if e is SameEnv:
-                    e = env
+    ) -> Optional[_R | tuple[_R, dict[int, Optional[_RR]]]]:
+        def _call_normal() -> _R:
+            assert self._substeps is None
+            path = self._get_path(self._pkg, self._action, builder)
+            env = make_env_for(builder, self._pkg, self._action)
+            return self._fn(self._pkg, path, env, *args, **kwargs)
 
-            result = self._fn(pkg, path, env, *fwargs, **fwkwargs)
-            subresults = [func()]
-            return result, subresults
+        def _call_with_substeps() -> tuple[_R, dict[int, Optional[_RR]]]:
+            assert self._substeps is not None
+            path = self._get_path(self._pkg, self._action, builder)
+            env = make_env_for(builder, self._pkg, self._action)
+            res = self._fn(self._pkg, path, env, *args, **kwargs)
+            subresults = {}
+            for subfn, (subact, substep_info), subpath, subenv in self._substeps:
+                assert substep_info is not None
+                part, _ = substep_info
+                if isinstance(subenv, SameEnvMarkerType):
+                    prepared_env = env
+                else:
+                    prepared_env = subenv
+                if isinstance(subpath, SamePathMarkerType):
+                    prepared_path = path
+                else:
+                    prepared_path = subpath
+                subresults[part] = self._do_call(
+                    True,
+                    lambda: subfn(
+                        self._pkg, prepared_path, prepared_env, *args, **kwargs
+                    ),
+                    self._pkg,
+                    StepInfo((subact, substep_info)),
+                )
 
-        # if self._substeps is not None:
-        #    return self._do_call(
-        #        False,
-        #        _call_with_substeps,
-        #        self._pkg,
-        #        self._action,
-        #        builder,
-        #        *args,
-        #        **kwargs,
-        #    )
-        path = self._get_path(self._pkg, self._action, builder)
-        env = make_env_for(builder, self._pkg, self._action)
+            return res, subresults
+
+        if self._substeps is not None:
+            return self._do_call(
+                False, _call_with_substeps, self._pkg, StepInfo((self._action, None))
+            )
         return self._do_call(
-            False,
-            self._substeps,
-            path,
-            env,
-            self._fn,
-            self._pkg,
-            self._action,
-            builder,
-            *args,
-            **kwargs,
+            False, _call_normal, self._pkg, StepInfo((self._action, None))
         )
 
 
@@ -316,10 +287,32 @@ def make(
     target: str,
 ) -> CompletedProcess[str]:
     with save_env(env=env, path=path) as savedenv:
-        return run_executable(
-            "make", [*MAKEFLAGS, target], universal_newlines=True, check=True
-        )
+        if pkg == ToolchainComponent.NASM:
+            return run_executable(
+                "make",
+                [
+                    *MAKEFLAGS,
+                    target,
+                    "AR=" + os.environ["AR"],
+                    "RANLIB=" + os.environ["RANLIB"],
+                ],
+                universal_newlines=True,
+                check=True,
+            )
+        else:
+            return run_executable(
+                "make", [*MAKEFLAGS, target], universal_newlines=True, check=True
+            )
     return unreachable()
+
+
+def noop(
+    pkg: ToolchainComponent,
+    path: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    /,
+):
+    return None
 
 
 _REG_VERSION_STRING = r"^/?(%s-)?(?P<version>\d+\.\d+(\.\d+)?)((\.(zip|tar.*)|/)?)$"
@@ -458,6 +451,17 @@ def configure(
     return None
 
 
+def substep(
+    fn: _StepFn[_P, _R],
+    action: BuildAction,
+    part: int,
+    desc: str,
+    path: Optional[Path | SamePathMarkerType] = None,
+    env: Optional[dict[str, str] | SameEnvMarkerType] = None,
+) -> Step.SubStepArgs:
+    return (fn, StepInfo((action, (part, desc))), path, env)
+
+
 def _get_download_func(pkg: ToolchainComponent) -> _DownloadFunc:
     match pkg:
         case gnu if gnu.is_gnu_pkg:
@@ -492,55 +496,267 @@ def _get_download_func(pkg: ToolchainComponent) -> _DownloadFunc:
             sig_url = Template(f"{_base_url}/${{pkg}}-${{version}}.tar.xz.sig")
         case _:
             return unreachable(f"unknown or unsupported package `{pkg}`")
-    return lambda builder: Step(download_latest, pkg, BuildAction.DOWNLOAD)(
-        builder, url=url, archive_url=archive_url, sig_url=sig_url
+    return lambda builder: assert_none(
+        Step(download_latest, pkg, BuildAction.DOWNLOAD)(
+            builder, url=url, archive_url=archive_url, sig_url=sig_url
+        )
     )
+
+
+def gcc_prerequisites(
+    pkg: ToolchainComponent,
+    path: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    /,
+):
+    with save_env(env=env, path=path) as savedenv:
+        run_executable("./contrib/download_prerequisites", [])
+    return None
+
+
+def sed(
+    pkg: ToolchainComponent,
+    path: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    /,
+    *sed_args: str,
+    sed_script: str,
+    in_place: Optional[Path],
+):
+    with save_env(env=env, path=path) as savedenv:
+        if in_place is not None:
+            run_executable("sed", [*sed_args, "-i", "-e", sed_script, in_place])
+        else:
+            run_executable("sed", [*sed_args, "-e", sed_script])
+    return None
 
 
 def _get_configure_func(pkg: ToolchainComponent) -> _ConfigureFunc:
     def _create_pkg_build_directory(builder: KernelToolchainBuilder):
         return (builder.build_directory / pkg).mkdir()
 
+    def _gcc_conf(builder: KernelToolchainBuilder):
+        _create_pkg_build_directory(builder)
+        gcc_conf_args = [
+            "--target=" + builder.target,
+            "--prefix=" + stringify(builder.prefix),
+            "--enable-languages=c,c++",
+            "--enable-decimal-float=yes",
+            "--enable-fixed-point=auto",
+            "--enable-lto",
+            "--enable-long-long",
+            "--with-long-double-128",
+            "--with-static-standard-libraries",
+            "--enable-plugin",
+            "--without-headers",
+            "--disable-shared",
+            "--disable-host-shared",
+            "--disable-libssp",
+            "--disable-libstdcxx-pch",
+            "--disable-libada",
+            "--disable-libsanitizer",
+            "--disable-libquadmath",
+            "--disable-libgomp",
+            "--disable-hosted-libstdcxx",
+            "--enable-libstdcxx-static-eh-pool",
+            "--with-libstdcxx-eh-pool-obj-count=64",
+            "--disable-thread",
+            "--with-gnu-as",
+            "--with-gnu-ld",
+            "--with-arch=" + builder._default_arch,
+            "--with-tune=" + builder._default_tune,
+        ]
+        substeps = [
+            substep(
+                gcc_prerequisites,
+                BuildAction.CONFIGURE,
+                1,
+                "download gcc prerequisites",
+                builder.src_directory / "gcc",
+                SameEnv,
+            ),
+            substep(
+                lambda pkg, path=None, env=None: configure(
+                    pkg,
+                    path,
+                    env,
+                    *gcc_conf_args,
+                    pkgdir=(builder.src_directory / "gcc"),
+                ),
+                BuildAction.CONFIGURE,
+                2,
+                "run configure script",
+                SamePath,
+                SameEnv,
+            ),
+        ]
+        step = Step(noop, ToolchainComponent.GCC, BuildAction.CONFIGURE, *substeps)
+        step(builder)
+        return None
+
+    configure_args: Callable[[KernelToolchainBuilder], list[str]]
     match pkg:
+        case ToolchainComponent.GCC:
+            return _gcc_conf
         case ToolchainComponent.BINUTILS:
-            [
-                "--target=" + ENV_VARS["TARGET"],
-                "--prefix=" + ENV_VARS["PREFIX"],
+            configure_args = lambda builder: [
+                "--target=" + builder.target,
+                "--prefix=" + stringify(builder.prefix),
                 "--with-sysroot",
                 "--disable-werror",
             ]
-            pass
+        case ToolchainComponent.NASM:
+            configure_args = lambda builder: [
+                "--prefix=" + stringify(builder.prefix),
+                "--enable-lto",
+            ]
+        case ToolchainComponent.GDB:
+            configure_args = lambda builder: [
+                "--target=" + builder.target,
+                "--prefix=" + stringify(builder.prefix),
+                "--disable-werror",
+                "--with-python=/usr/bin/python3",
+                "--with-guile=guile-3.0",
+            ]
+        case ToolchainComponent.QEMU:
+            configure_args = lambda builder: [
+                "--prefix=" + stringify(builder.prefix),
+                "--target-list=" + builder._arch.to_qemu_target_list(),
+                "--python=/usr/bin/python3",
+                "--gdb="
+                + stringify(builder.install_directory / "bin" / builder.target)
+                + "-gdb",
+                "--enable-lto",
+                "--enable-strip",
+                "--enable-tcg-interpreter",
+                "--disable-docs",
+                "--enable-virtfs",
+                "--enable-plugins",
+            ]
+        case _:
+            return unreachable(f"unknown or unsupported package `{pkg}`")
+
+    def _retfn(
+        cfgargs: Callable[[KernelToolchainBuilder], list[str]],
+        builder: KernelToolchainBuilder,
+    ):
+        _create_pkg_build_directory(builder)
+        return assert_none(
+            Step(configure, pkg, BuildAction.CONFIGURE)(
+                builder,
+                *cfgargs(builder),
+                pkgdir=(builder.src_directory / pkg),
+            )
+        )
+
+    return bind(_retfn, configure_args)
 
 
 def _get_build_func(pkg: ToolchainComponent) -> _BuildFunc:
-    pass
+    def _build_gcc(builder: KernelToolchainBuilder):
+        counter = 1
+
+        def _mk_sed_substep() -> Step.SubStepArgs:
+            nonlocal counter
+            ret = substep(
+                bind(
+                    sed,
+                    sed_script="s/PICFLAG/DISABLED_PICFLAG/g",
+                    in_place=(Path(builder.target) / "libgcc" / "Makefile"),
+                ),
+                BuildAction.BUILD,
+                counter,
+                "patch libgcc to enable building with -mcmodel=kernel",
+                SamePath,
+                SameEnv,
+            )
+            counter += 1
+            return ret
+
+        def _mk_make_substep(
+            what: str, msg: Optional[str] = None, tgt: str = "all"
+        ) -> Step.SubStepArgs:
+            nonlocal counter
+            ret = substep(
+                bind(make, target=f"{tgt}-{what}"),
+                BuildAction.BUILD,
+                counter,
+                msg or f"build {what}",
+                SamePath,
+                SameEnv,
+            )
+            counter += 1
+            return ret
+
+        substeps = [
+            _mk_make_substep(
+                "target-libgcc", msg="configure target-libgcc", tgt="configure"
+            ),
+            _mk_sed_substep(),
+            _mk_make_substep("gcc"),
+            _mk_make_substep("target-libgcc"),
+            _mk_make_substep("target-libstdc++-v3"),
+        ]
+        step = Step(noop, ToolchainComponent.GCC, BuildAction.BUILD, *substeps)
+        return step(builder)
+
+    match pkg:
+        case ToolchainComponent.GCC:
+            return _build_gcc
+        case (
+            ToolchainComponent.BINUTILS
+            | ToolchainComponent.NASM
+            | ToolchainComponent.GDB
+            | ToolchainComponent.QEMU
+        ):
+            return lambda builder: Step(make, pkg, BuildAction.BUILD)(
+                builder, target="all"
+            )
+        case _:
+            return unreachable(f"unknown or unsupported package `{pkg}`")
+
+    return unreachable()
 
 
 def _get_install_func(pkg: ToolchainComponent) -> _InstallFunc:
-    def _gcc_inst(builder: KernelToolchainBuilder) -> list[CompletedProcess[str]]:
-        completed = []
-        for target in [
-            "install-gcc",
-            "install-target-libgcc",
-            "install-target-libstdc++-v3",
-        ]:
-            completed.append(
-                Step(make, ToolchainComponent.GCC, BuildAction.INSTALL)(
-                    builder, target=target
-                )
+    def _assert_not_tuple(value):
+        assert not isinstance(value, tuple)
+        return value
+
+    def _gcc_inst(builder: KernelToolchainBuilder) -> dict[int, CompletedProcess[str]]:
+        counter = 1
+
+        def _mk_substep(what: str) -> Step.SubStepArgs:
+            nonlocal counter
+            ret = substep(
+                bind(make, target=f"install-{what}"),
+                BuildAction.INSTALL,
+                counter,
+                f"install {what}",
+                SamePath,
+                SameEnv,
             )
-        return completed
+            counter += 1
+            return ret
+
+        substeps = [
+            _mk_substep("gcc"),
+            _mk_substep("target-libgcc"),
+            _mk_substep("target-libstdc++-v3"),
+        ]
+        step = Step(noop, ToolchainComponent.GCC, BuildAction.INSTALL, *substeps)
+        res = assert_some(step(builder))
+        return dict(map((lambda kv: (kv[0], assert_some(kv[1]))), res[1].items()))
 
     match pkg:
         case (
             ToolchainComponent.BINUTILS
             | ToolchainComponent.NASM
             | ToolchainComponent.QEMU
-            | ToolchainComponent.LIMINE
             | ToolchainComponent.GDB
         ):
-            return lambda builder: Step(make, pkg, BuildAction.INSTALL)(
-                builder, target="install"
+            return lambda builder: _assert_not_tuple(
+                Step(make, pkg, BuildAction.INSTALL)(builder, target="install")
             )
         case ToolchainComponent.GCC:
             return _gcc_inst
@@ -566,8 +782,7 @@ def make_env_for(
     env["TARGET"] = builder.target
 
     if pkg == ToolchainComponent.GCC and action == BuildAction.CONFIGURE:
-        todo()
-    # TODO: maybe arch ?
+        pass  # TODO: maybe arch ?
     return env
 
 
@@ -767,6 +982,7 @@ def main(args: Namespace) -> int:
         )
         builder.prepare()
         builder.download()
+        builder.build_and_install()
     except AlreadyPrinted:
         perror("failed to build kernel toolchain")
         return 1

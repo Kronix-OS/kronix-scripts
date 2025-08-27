@@ -3,6 +3,7 @@ from enum import StrEnum
 from typing import Self, Callable, Optional, Any
 from .utils.errprint import *
 
+
 class Bootloader(StrEnum):
     # fmt: off
     LIMINE = "limine"
@@ -24,16 +25,30 @@ class Arch(StrEnum):
     # fmt: on
 
     def to_kernel_triplet(self) -> str:
+        from .utils import todo, unreachable
+
         match self:
             case Arch.AMD64:
-                return "x86_64-unknown-none-elf"
-            case other:
-                raise NotImplementedError(
-                    f"this function is yet to be implemented for arch {other}"
-                )
+                return "x86_64-pc-elf"
+            case _:
+                return todo(f"this function is yet to be implemented for arch {self}")
+        return unreachable()
+
+    def to_qemu_target_list(self: Self) -> str:
+        from .utils import todo, unreachable
+
+        match self:
+            case Arch.AMD64:
+                return "x86_64-softmmu,i386-softmmu"
+            case Arch.X86:
+                return "i386-softmmu"
+            case _:
+                return todo(f"this function is yet to be implemented for arch {self}")
         return unreachable()
 
     def supported_by(self, bootloader: Bootloader) -> bool:
+        from .utils import todo, unreachable
+
         match bootloader:
             case Bootloader.LIMINE:
                 return any(
@@ -51,15 +66,15 @@ class Arch(StrEnum):
                         ],
                     )
                 )
-            case other:
-                raise NotImplementedError(
-                    f"this function is yet to be implemented for bootloader {other}"
+            case _:
+                return todo(
+                    f"this function is yet to be implemented for bootloader {bootloader}"
                 )
         return unreachable()
 
     @classmethod
     def coerce_from(cls: type[Self], arch: str) -> Self:
-        arch = arch.lower()
+        arch = arch.lower().strip()
         exc = None
         try:
             return cls(arch)
@@ -78,7 +93,9 @@ class Arch(StrEnum):
                 return cls(cls.AARCH64)
         raise exc
 
+
 type _PRINT_HELP_T = Callable[[], None]
+
 
 class Namespace(argparse.Namespace):
     def __init__(self, **kwargs: Any):
@@ -95,7 +112,8 @@ class Namespace(argparse.Namespace):
             return 1
 
         return getattr(self, "func", _invalid_args_provided)(self)
-    
+
+
 def common_main(args: Namespace):
     if args.log is not None:
         assert isinstance(args.log, str)

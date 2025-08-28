@@ -114,10 +114,21 @@ class Namespace(argparse.Namespace):
         return getattr(self, "func", _invalid_args_provided)(self)
 
 
+_PRINT_MAIN_FUNC_TIMINGS: bool = False
+
+
+def print_main_func_timings() -> bool:
+    global _PRINT_MAIN_FUNC_TIMINGS
+    return _PRINT_MAIN_FUNC_TIMINGS
+
+
 def common_main(args: Namespace):
+    global _PRINT_MAIN_FUNC_TIMINGS
     if args.log is not None:
         assert isinstance(args.log, str)
         set_logfile(args.log)
     assert isinstance(args.debug, bool)
     set_debug_mode(args.debug)
+    assert isinstance(args.time, bool)
+    _PRINT_MAIN_FUNC_TIMINGS = args.time
     return None

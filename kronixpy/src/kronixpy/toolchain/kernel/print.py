@@ -9,7 +9,7 @@ def main(args: Namespace) -> int:
 
     arch = Arch.coerce_from(args.architecture)
     toolchain_directory = Path(args.toolchain_dir).resolve()
-    pkg = args.component
+    pkg = args.component[0]
 
     print(toolchain_directory / "install" / "bin" / f"{arch.to_kernel_triplet()}-{pkg}")
 

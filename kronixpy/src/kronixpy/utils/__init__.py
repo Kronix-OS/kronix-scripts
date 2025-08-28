@@ -1,4 +1,5 @@
 from typing import (
+    Callable,
     Literal,
     Any,
     Generator,
@@ -322,3 +323,16 @@ def run_executable(executable: Any, cmdargs: Sequence[Any], *args: Any, **kwargs
 TrueLiteral = Literal[True]
 FalseLiteral = Literal[False]
 type UnusedType = NoneType
+
+
+def disjunction[**P](*funcs: Callable[P, bool]) -> Callable[P, bool]:
+    def _ret(*args: P.args, **kwargs: P.kwargs) -> bool:
+        return any(map(lambda fn: fn(*args, **kwargs), funcs))
+
+    return _ret
+
+def conjunction[**P](*funcs: Callable[P, bool]) -> Callable[P, bool]:
+    def _ret(*args: P.args, **kwargs: P.kwargs) -> bool:
+        return all(map(lambda fn: fn(*args, **kwargs), funcs))
+
+    return _ret

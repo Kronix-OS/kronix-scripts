@@ -9,6 +9,7 @@ from .toolchain import ToolchainComponent
 from .toolchain.kernel.build import main as ktoolchain_build_main
 from .toolchain.kernel.print import main as ktoolchain_print_main
 from .utils.errprint import *
+from .utils import disjunction
 from .common import *
 
 __author__ = "Axel PASCON <axelpascon@nullware.dev>"
@@ -27,6 +28,11 @@ PARSER_DESCRIPTOR = {
             "action": "store_true",
             "help": "Enable printing of various debug information",
         },
+        {
+            "names": ["--time"],
+            "action": "store_true",
+            "help": "Enable printing the time taken by the main function (mainly for developping purposes)",
+        }
     ],
     "subcommands": {
         "toolchain": {
@@ -83,7 +89,6 @@ PARSER_DESCRIPTOR = {
                                 {
                                     "names": ["component"],
                                     "type": str,
-                                    "required": True,
                                     "nargs": 1,
                                     "help": "The toolchain component whose path is to be printed",
                                 }
@@ -215,7 +220,29 @@ def timeit[**P, R](func: Callable[P, R]) -> Callable[P, R]:
     return _decorated
 
 
-@timeit
+def timeitwhen[**P, R](
+    predicate: Callable[[], bool],
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def _ret(func: Callable[P, R]) -> Callable[P, R]:
+        funcname = intern(func.__qualname__)
+
+        @wraps(func)
+        def _decorated(*args: P.args, **kwargs: P.kwargs) -> R:
+            currtime = time.time()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                if predicate():
+                    pinfo(
+                        f"function `{funcname}` ran for a total of {time.time() - currtime:.3f} seconds"
+                    )
+
+        return _decorated
+
+    return _ret
+
+
+@timeitwhen(disjunction(get_debug_mode, print_main_func_timings))
 def main() -> int:
     args = CliArgs().parse_args()
     return args()
